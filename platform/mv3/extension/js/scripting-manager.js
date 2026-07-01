@@ -36,6 +36,7 @@ import { registerCustomFilters } from './filter-manager.js';
 import { registerJob } from './alarms.js';
 import { registerPreventPopup } from './prevent-popup.js';
 import { registerToolbarIconToggler } from './action.js';
+import { rulesetConfig } from './config.js';
 
 /******************************************************************************/
 
@@ -307,6 +308,32 @@ function registerScriptlet(context, scriptletDetails) {
 // Issue: Safari appears to completely ignore excludeMatches
 // https://github.com/radiolondra/ExcludeMatches-Test
 
+function registerAudit(context) {
+    // Annotation (audit) mode: inject the page-global mirror (MAIN world) and
+    // the isolated bridge on every page/frame so `window.__ubolAudit` is present
+    // and the would-be-blocked dataset is mirrored to the page.
+    if ( rulesetConfig.annotationMode !== true ) { return; }
+    const { toAdd } = context;
+    toAdd.push({
+        id: 'audit-bridge',
+        js: [ '/js/scripting/audit-bridge.js' ],
+        allFrames: true,
+        matches: [ '<all_urls>' ],
+        runAt: 'document_start',
+    });
+    const mainWorldDirective = {
+        id: 'audit-page',
+        js: [ '/js/scripting/audit-page.js' ],
+        allFrames: true,
+        matches: [ '<all_urls>' ],
+        runAt: 'document_start',
+        world: 'MAIN',
+    };
+    toAdd.push(mainWorldDirective);
+}
+
+/******************************************************************************/
+
 export async function registerContentScripts() {
     if ( browser.scripting === undefined ) { return false; }
     registerContentScripts.pendingOp =
@@ -341,6 +368,7 @@ registerContentScripts.register = async function register() {
         registerCustomFilters(context),
         registerPreventPopup(context),
         registerToolbarIconToggler(context),
+        registerAudit(context),
     ]);
 
     ubolLog(`Unregistered all content (css/js)`);

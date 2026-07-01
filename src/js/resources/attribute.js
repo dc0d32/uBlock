@@ -61,6 +61,7 @@ export function setAttrFn(
             if ( after !== '' && /^on/i.test(attr) ) {
                 if ( attr.toLowerCase() in elem ) { continue; }
             }
+            if ( safe.auditElement(elem, 'set-attr', `${attr}=${after}`) ) { continue; }
             elem.setAttribute(attr, after);
             safe.uboLog(logPrefix, `${attr}="${after}"`);
         }
@@ -256,6 +257,7 @@ export function removeAttr(
             for ( const node of nodes ) {
                 for ( const attr of tokens ) {
                     if ( node.hasAttribute(attr) === false ) { continue; }
+                    if ( safe.auditElement(node, 'remove-attr', attr) ) { continue; }
                     node.removeAttribute(attr);
                     safe.uboLog(logPrefix, `Removed attribute '${attr}'`);
                 }

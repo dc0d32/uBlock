@@ -150,7 +150,7 @@ if ( since > 1 ) {
 const { s, p } = cacheEntry;
 
 if ( s.length !== 0 ) {
-    self.cssAPI.insert(`${s.join(',\n')}{display:none!important;}`);
+    self.cssAPI.hide(`${s.join(',\n')}`, 'specific');
 }
 
 if ( p.length === 0 ) { return; }

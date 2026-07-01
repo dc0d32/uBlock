@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "lint": "eslint --no-warn-ignored --ignore-pattern \"**/lib/\" --ignore-pattern \"**/npm/\" -- \"./src/js/*.js\" \"./src/js/**/*.js\" \"./**/*.json\" \"./platform/**/*.js\"",
+    "test:mv3": "node --test \"platform/mv3/tests/**/*.test.js\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {

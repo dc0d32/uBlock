@@ -168,6 +168,19 @@ if [ -z "$TAGNAME" ]; then
     jq '.permissions += ["declarativeNetRequestFeedback"]' \
         "$UBOL_DIR/manifest.json" > "$tmp_manifest" \
         && mv "$tmp_manifest" "$UBOL_DIR/manifest.json"
+    # Annotation (audit) mode extras (dev/sideloaded builds only):
+    #   - webRequest: non-blocking observation for derived-resource attribution
+    #   - debugger:   optional CDP path for precise script-level initiator chains
+    #                 (Chromium only; ignored by Firefox)
+    if [ "$PLATFORM" = "firefox" ]; then
+        jq '.permissions += ["webRequest"]' \
+            "$UBOL_DIR/manifest.json" > "$tmp_manifest" \
+            && mv "$tmp_manifest" "$UBOL_DIR/manifest.json"
+    else
+        jq '.permissions += ["webRequest","debugger"]' \
+            "$UBOL_DIR/manifest.json" > "$tmp_manifest" \
+            && mv "$tmp_manifest" "$UBOL_DIR/manifest.json"
+    fi
     # Use a different extension id than the official one
     if [ "$PLATFORM" = "firefox" ]; then
         jq '.browser_specific_settings.gecko.id = "uBOLite.dev@raymondhill.net"' "$UBOL_DIR/manifest.json"  > "$tmp_manifest" \

@@ -101,6 +101,16 @@ import {
 } from './ruleset-manager.js';
 
 import {
+    getAuditData,
+    initAnnotation,
+    isAnnotationModeAvailable,
+    recordScriptletRequest,
+    resetAudit,
+    setAnnotationMode,
+    setPreciseInitiators,
+} from './annotation.js';
+
+import {
     getConsoleOutput,
     getMatchedRules,
     isSideloaded,
@@ -413,6 +423,9 @@ async function onMessage(request, sender) {
             firstRun: process.firstRun,
             isSideloaded,
             developerMode: rulesetConfig.developerMode,
+            annotationMode: rulesetConfig.annotationMode,
+            preciseInitiators: rulesetConfig.preciseInitiators,
+            annotationModeAvailable: isAnnotationModeAvailable(),
             disabledFeatures,
             supportsCompiledFilters: supportsOffscreenDocument,
             supportsUserScripts: supportsUserScripts(),
@@ -467,6 +480,40 @@ async function onMessage(request, sender) {
     case 'setDeveloperMode':
         return setDeveloperMode(request.state);
 
+    case 'setAnnotationMode': {
+        const state = await setAnnotationMode(request.state);
+        await registerContentScripts();
+        return state;
+    }
+
+    case 'setPreciseInitiators':
+        return setPreciseInitiators(request.state);
+
+    case 'getAuditData':
+        return getAuditData(request.tabId);
+
+    case 'getAuditDataForSelf':
+        return getAuditData(sender?.tab?.id ?? -1);
+
+    case 'resetAudit':
+        resetAudit(request.tabId);
+        return;
+
+    case 'recordScriptletRequest': {
+        const tabId = sender?.tab?.id ?? -1;
+        const frameId = sender?.frameId ?? -1;
+        const documentId = sender?.documentId ?? '';
+        recordScriptletRequest(Object.assign({ tabId, frameId, documentId }, request.details));
+        return;
+    }
+
+    case 'showAuditView':
+        browser.windows.create({
+            type: 'popup',
+            url: `/audit.html?tab=${request.tabId}`,
+        });
+        return;
+
     case 'popupPanelData': {
         const results = await Promise.all([
             hasBroadHostPermissions(),
@@ -480,6 +527,7 @@ async function onMessage(request, sender) {
             autoReload: rulesetConfig.autoReload,
             isSideloaded,
             developerMode: rulesetConfig.developerMode,
+            annotationMode: rulesetConfig.annotationMode,
             disabledFeatures: results[2],
             hasCustomFilters: results[3],
         };
@@ -839,6 +887,7 @@ async function start() {
     }
 
     toggleDeveloperMode(rulesetConfig.developerMode);
+    await initAnnotation();
 }
 
 /******************************************************************************/

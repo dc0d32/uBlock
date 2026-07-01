@@ -291,6 +291,22 @@
     "message": "Enables access to features suitable for technical users.",
     "description": "Short description for a checkbox in the options page"
   },
+  "annotationModeLabel": {
+    "message": "Annotation (audit) mode",
+    "description": "Label for a checkbox in the options page"
+  },
+  "annotationModeLegend": {
+    "message": "Records what would have been filtered instead of enforcing it: matched elements are tagged in the DOM and would-be-blocked network requests are collected. Available only in developer/sideloaded builds.",
+    "description": "Short description for a checkbox in the options page"
+  },
+  "preciseInitiatorsLabel": {
+    "message": "Precise network initiators (CDP)",
+    "description": "Label for a checkbox in the options page"
+  },
+  "preciseInitiatorsLegend": {
+    "message": "Uses the debugger API to resolve exact script-to-script causality for derived would-be-blocked requests. Chromium only; shows a debugging banner while active.",
+    "description": "Short description for a checkbox in the options page"
+  },
   "settingsBackupRestoreLabel": {
     "message": "Backup",
     "description": "The header text for the back up/restore section"

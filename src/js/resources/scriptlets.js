@@ -265,6 +265,9 @@ function replaceNodeTextFn(
         const after = pattern !== ''
             ? before.replace(rePattern, replacement)
             : replacement;
+        if ( safe.auditElement(node, 'remove-node-text', pattern) ) {
+            return sedCount === 0 || (sedCount -= 1) !== 0;
+        }
         node.textContent = node.nodeName === 'SCRIPT'
             ? textContentFactory.createScript(after)
             : after;
@@ -698,6 +701,7 @@ function removeClass(
         try {
             const nodes = document.querySelectorAll(selector);
             for ( const node of nodes ) {
+                if ( safe.auditElement(node, 'remove-class', tokens.join(' ')) ) { continue; }
                 node.classList.remove(...tokens);
                 safe.uboLog(logPrefix, 'Removed class(es)');
             }
@@ -1183,8 +1187,10 @@ function xmlPrune(
             safe.uboLog(logPrefix, `Removing ${items.length} items`);
             for ( const item of items ) {
                 if ( item.nodeType === 1 ) {
+                    if ( safe.auditElement(item, 'remove') ) { continue; }
                     item.remove();
                 } else if ( item.nodeType === 2 ) {
+                    if ( safe.auditElement(item.ownerElement, 'remove-attr', item.nodeName) ) { continue; }
                     item.ownerElement.removeAttribute(item.nodeName);
                 }
                 safe.uboLog(logPrefix, `${item.constructor.name}.${item.nodeName} removed`);

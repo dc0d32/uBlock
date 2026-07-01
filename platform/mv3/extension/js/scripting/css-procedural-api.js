@@ -592,6 +592,9 @@ class ProceduralFilterer {
         this.styledNodes = new Set();
         this.timer = undefined;
         this.hideStyle = 'display:none!important;';
+        // Annotation (audit) mode: tag rather than hide/remove. Set by the
+        // ProceduralFiltererAPI once cssAPI readiness is known.
+        this.annotate = false;
     }
 
     async reset() {
@@ -687,6 +690,11 @@ class ProceduralFilterer {
     processNodes(nodes, action) {
         const op = action && action[0] || '';
         const arg = op !== '' ? action[1] : '';
+        // Annotation (audit) mode: record what would have happened via
+        // `data-ubol-*` attributes instead of hiding/removing/mutating.
+        if ( this.annotate ) {
+            return this.annotateNodes(nodes, op, arg);
+        }
         switch ( op ) {
         case '':
             /* fall through */
@@ -725,6 +733,49 @@ class ProceduralFilterer {
                     if ( reClass.test(name) === false ) { continue; }
                     cl.remove(name);
                 }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    // Annotation (audit) mode counterpart of processNodes: tag the target
+    // nodes describing what a procedural filter *would* have done, without
+    // actually hiding/removing/mutating them.
+    annotateNodes(nodes, op, arg) {
+        switch ( op ) {
+        case '':
+        case 'style':
+            for ( const node of nodes ) {
+                node.setAttribute('data-ubol-hide', 'procedural');
+            }
+            break;
+        case 'remove':
+            for ( const node of nodes ) {
+                node.setAttribute('data-ubol-remove', 'procedural');
+            }
+            break;
+        case 'remove-attr': {
+            const reAttr = regexFromString(arg, true);
+            for ( const node of nodes ) {
+                const names = node.getAttributeNames().filter(n =>
+                    reAttr.test(n) && n.startsWith('data-ubol-') === false
+                );
+                if ( names.length === 0 ) { continue; }
+                node.setAttribute('data-ubol-remove-attr', names.join(' '));
+            }
+            break;
+        }
+        case 'remove-class': {
+            const reClass = regexFromString(arg, true);
+            for ( const node of nodes ) {
+                const names = Array.from(node.classList.values()).filter(n =>
+                    reClass.test(n)
+                );
+                if ( names.length === 0 ) { continue; }
+                node.setAttribute('data-ubol-remove-class', names.join(' '));
             }
             break;
         }
@@ -781,7 +832,7 @@ self.ProceduralFiltererAPI = class {
         await Promise.all(promises);
     }
 
-    addDeclaratives(selectors) {
+    async addDeclaratives(selectors) {
         const cssRuleFromProcedural = details => {
             const { tasks, action } = details;
             let mq, selector;
@@ -809,6 +860,23 @@ self.ProceduralFiltererAPI = class {
             }
             return `@media ${mq} {\n${selector}\n{${style}}\n}`;
         };
+        await self.cssAPI.ready;
+        // Annotation (audit) mode: tag matching elements with
+        // `data-ubol-hide="declarative"` instead of injecting the stylesheet.
+        if ( self.cssAPI.annotating ) {
+            for ( const details of selectors ) {
+                let selector = details.selector;
+                if ( Array.isArray(details.tasks) ) {
+                    const media = details.tasks.find(t => t[0] === 'matches-media');
+                    if ( media && self.matchMedia(media[1]).matches === false ) { continue; }
+                    const spath = details.tasks.find(t => t[0] === 'spath');
+                    if ( spath ) { selector = spath[1]; }
+                }
+                if ( typeof selector !== 'string' || selector === '' ) { continue; }
+                self.cssAPI.hide(selector, 'declarative');
+            }
+            return;
+        }
         const sheetText = [];
         for ( const details of selectors ) {
             const ruleText = cssRuleFromProcedural(details);
@@ -822,10 +890,12 @@ self.ProceduralFiltererAPI = class {
         self.cssAPI.insert(cssSheet);
     }
 
-    addProcedurals(selectors) {
+    async addProcedurals(selectors) {
         if ( this.proceduralFilterer === null ) {
             this.proceduralFilterer = new ProceduralFilterer();
         }
+        await self.cssAPI.ready;
+        this.proceduralFilterer.annotate = self.cssAPI.annotating === true;
         if ( this.domObserver === null ) {
             this.domObserver = new MutationObserver(mutations => {
                 this.onDOMChanged(mutations);

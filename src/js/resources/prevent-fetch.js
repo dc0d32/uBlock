@@ -91,6 +91,11 @@ function preventFetchFn(
         if ( matched === undefined || matched.length === 0 ) {
             return context.reflect();
         }
+        // uBOL annotation (audit) mode: record the would-be-suppressed request
+        // and proceed with the real fetch instead of returning a fake response.
+        if ( safe.auditNetwork(details.url, 'fetch') ) {
+            return context.reflect();
+        }
         return Promise.resolve(generateContentFn(trusted, responseBody)).then(text => {
             safe.uboLog(logPrefix, `Prevented with response "${text}"`);
             const headers = Object.assign({}, responseHeaders);

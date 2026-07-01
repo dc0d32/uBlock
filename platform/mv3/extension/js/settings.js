@@ -75,6 +75,16 @@ function renderWidgets() {
         dom.body.dataset.develop = `${state}`;
         dom.prop('#developerMode input[type="checkbox"]', 'checked', state);
     }
+
+    {
+        const available = data.annotationModeAvailable === true;
+        dom.attr('#annotationMode', 'hidden', available ? null : '');
+        dom.attr('#preciseInitiators', 'hidden', available ? null : '');
+        dom.prop('#annotationMode input[type="checkbox"]', 'checked',
+            Boolean(data.annotationMode));
+        dom.prop('#preciseInitiators input[type="checkbox"]', 'checked',
+            Boolean(data.preciseInitiators));
+    }
 }
 
 /******************************************************************************/
@@ -225,6 +235,14 @@ dom.on('#developerMode input[type="checkbox"]', 'change', ev => {
     const state = ev.target.checked;
     sendMessage({ what: 'setDeveloperMode', state });
     dom.body.dataset.develop = `${state}`;
+});
+
+dom.on('#annotationMode input[type="checkbox"]', 'change', ev => {
+    sendMessage({ what: 'setAnnotationMode', state: ev.target.checked });
+});
+
+dom.on('#preciseInitiators input[type="checkbox"]', 'change', ev => {
+    sendMessage({ what: 'setPreciseInitiators', state: ev.target.checked });
 });
 
 dom.on('section[data-pane="settings"] button:has([data-i18n="backupButton"])', 'click', ( ) => {

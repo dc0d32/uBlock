@@ -122,6 +122,9 @@ function hrefSanitizer(
             const hrefAfter = validateURL(text);
             if ( hrefAfter === '' ) { continue; }
             if ( hrefAfter === href ) { continue; }
+            // uBOL annotation (audit) mode: tag the link instead of rewriting
+            // its href.
+            if ( safe.auditElement(elem, 'sanitize-href', hrefAfter) ) { continue; }
             elem.setAttribute('href', hrefAfter);
             const count = sanitizeCopycats(href, hrefAfter);
             safe.uboLog(logPrefix, `Sanitized ${count+1} links to\n${hrefAfter}`);

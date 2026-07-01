@@ -224,6 +224,15 @@ dom.on('#gotoMatchedRules', 'click', ev => {
     });
 });
 
+dom.on('#gotoAudit', 'click', ev => {
+    if ( ev.isTrusted !== true ) { return; }
+    if ( ev.button !== 0 ) { return; }
+    sendMessage({
+        what: 'showAuditView',
+        tabId: currentTab.id,
+    });
+});
+
 /******************************************************************************/
 
 dom.on('#gotoReport', 'click', ev => {
@@ -335,6 +344,12 @@ async function init() {
     dom.cl.toggle('#gotoMatchedRules', 'enabled',
         popupPanelData.isSideloaded === true &&
         popupPanelData.developerMode &&
+        typeof currentTab.id === 'number' &&
+        isNaN(currentTab.id) === false
+    );
+
+    dom.cl.toggle('#gotoAudit', 'enabled',
+        popupPanelData.annotationMode === true &&
         typeof currentTab.id === 'number' &&
         isNaN(currentTab.id) === false
     );

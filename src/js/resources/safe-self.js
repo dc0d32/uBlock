@@ -71,6 +71,43 @@ export function safeSelf() {
         makeLogPrefix(...args) {
             return this.sendToLogger && `[${args.join(' \u205D ')}]` || '';
         },
+        // uBO Lite annotation (audit) mode hooks.
+        //
+        // When uBOL's annotation mode is active, the MAIN-world mirror
+        // `self.__ubolAudit` is present. In that case a scriptlet must *record*
+        // what it would have done instead of enforcing it:
+        //   - auditNetwork(url, kind): report a request that would have been
+        //     suppressed, and return true so the caller proceeds with the real
+        //     request. Returns false when annotation mode is off (enforce).
+        //   - auditElement(node, action, detail): tag the node with a
+        //     `data-ubol-*` attribute instead of mutating/removing it, and
+        //     return true. Returns false when annotation mode is off.
+        auditNetwork(url, kind) {
+            const audit = self.__ubolAudit;
+            if ( audit === undefined || typeof audit.report !== 'function' ) {
+                return false;
+            }
+            try {
+                audit.report({ url: `${url}`, type: `${kind || ''}` });
+            } catch {
+            }
+            return true;
+        },
+        auditElement(node, action, detail) {
+            const audit = self.__ubolAudit;
+            if ( audit === undefined ) { return false; }
+            if ( node instanceof Element === false ) { return true; }
+            try {
+                const attr = `data-ubol-${action}`;
+                if ( detail !== undefined && detail !== '' ) {
+                    node.setAttribute(attr, `scriptlet:${detail}`);
+                } else {
+                    node.setAttribute(attr, 'scriptlet');
+                }
+            } catch {
+            }
+            return true;
+        },
         uboLog(...args) {
             if ( this.sendToLogger === undefined ) { return; }
             if ( args === undefined || args[0] === '' ) { return; }

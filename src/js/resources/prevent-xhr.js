@@ -65,6 +65,11 @@ function preventXhrFn(
             return context.reflect();
         }
         if ( matchObjectPropertiesFn(propNeedles, haystack) ) {
+            // uBOL annotation (audit) mode: record the would-be-suppressed
+            // request and let the real XHR proceed (do not stub the response).
+            if ( safe.auditNetwork(haystack.url, 'xhr') ) {
+                return context.reflect();
+            }
             const xhrDetails = Object.assign(haystack, {
                 xhr: thisArg,
                 defer: args.length === 0 || !!args[0],

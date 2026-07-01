@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1">
+<meta name="color-scheme" content="light dark" />
+<title>Annotation (audit) mode</title>
+<link rel="stylesheet" href="css/default.css">
+<link rel="stylesheet" href="css/common.css">
+<link rel="stylesheet" href="css/fa-icons.css">
+<link rel="stylesheet" href="css/matched-rules.css">
+<style>
+#auditHeader {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    padding: 0.5em;
+}
+#auditHeader h1 {
+    font-size: 1.1em;
+    margin: 0;
+    margin-inline-end: auto;
+}
+#auditHeader .count {
+    font-family: monospace;
+    opacity: 0.75;
+}
+#auditEntries {
+    display: flex;
+    flex-direction: column;
+    font-family: monospace;
+    font-size: small;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+.record {
+    border-inline-start: 4px solid transparent;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15em;
+    padding: 0.35em 0.5em;
+}
+.record:nth-of-type(2n) {
+    background-color: lightgray;
+}
+html.dark .record:nth-of-type(2n) {
+    background-color: #444;
+}
+.record.direct {
+    border-inline-start-color: #c0392b;
+}
+.record.derived {
+    border-inline-start-color: #e67e22;
+}
+.record .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35em;
+}
+.record .badge {
+    border-radius: 3px;
+    color: white;
+    font-size: x-small;
+    padding: 0.05em 0.4em;
+    text-transform: uppercase;
+}
+.record.direct .verdict {
+    background-color: #c0392b;
+}
+.record.derived .verdict {
+    background-color: #e67e22;
+}
+.record .source {
+    background-color: #2980b9;
+}
+.record .type {
+    background-color: #7f8c8d;
+}
+.record .field {
+    display: flex;
+    gap: 0.4em;
+}
+.record .field > .label {
+    flex-shrink: 0;
+    opacity: 0.6;
+    width: 6em;
+}
+.record .chain {
+    opacity: 0.85;
+}
+.record .chain > .label {
+    display: block;
+    opacity: 0.6;
+}
+.record .chain > .frame::before {
+    content: '↳ ';
+    opacity: 0.6;
+}
+.record .hidden {
+    display: none;
+}
+</style>
+
+<link rel="shortcut icon" type="image/png" href="img/icon_64.png"/>
+</head>
+
+<body>
+
+<div id="auditHeader">
+    <h1>Annotation (audit) mode</h1>
+    <span class="count" id="auditCount"></span>
+    <button type="button" id="refresh">Refresh</button>
+    <button type="button" id="reset">Reset</button>
+</div>
+
+<div id="auditEntries">
+</div>
+
+<template id="auditRecord">
+    <div class="record">
+        <div class="badges">
+            <span class="badge verdict"></span>
+            <span class="badge source"></span>
+            <span class="badge type"></span>
+        </div>
+        <div class="field url">
+            <span class="label">url</span>
+            <span class="value"></span>
+        </div>
+        <div class="field initiator">
+            <span class="label">initiator</span>
+            <span class="value"></span>
+        </div>
+        <div class="field matchedRule">
+            <span class="label">rule</span>
+            <span class="value"></span>
+        </div>
+        <div class="chain">
+            <span class="label">initiator chain</span>
+        </div>
+    </div>
+</template>
+
+<script src="js/theme.js" type="module"></script>
+<script src="js/fa-icons.js" type="module"></script>
+<script src="js/i18n.js" type="module"></script>
+<script src="js/audit.js" type="module"></script>
+</body>
+</html>
