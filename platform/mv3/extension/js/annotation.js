@@ -51,6 +51,8 @@ import {
     stopPreciseInitiators,
 } from './annotation-cdp.js';
 import { AuditStore } from './annotation-store.js';
+import { DNRMatcher } from './dnr-matcher.js';
+import { getEnabledRulesets } from './ruleset-manager.js';
 
 /******************************************************************************/
 
@@ -119,24 +121,117 @@ function recordRequest(details, options) {
 
 /******************************************************************************/
 
-// Direct would-be-blocked capture via `onRuleMatchedDebug`.
+// Would-be-block oracle: a JS re-implementation of DNR matching (dnr-matcher.js)
+// that evaluates the *same* ruleset data uBOL ships, so we can report what the
+// DNR engine *would* have decided while enforcement is neutralized by the
+// passthrough rule (so the page actually loads unblocked).
 //
-// Requires the `declarativeNetRequestFeedback` permission (unpacked/sideloaded
-// builds only). While annotation mode is on we install a top-priority
-// `allowAllRequests` passthrough rule so the request is not actually blocked;
-// `onRuleMatchedDebug` still reports the matched block rule.
+// The matcher is validated against Chrome's own declarativeNetRequest
+// .testMatchOutcome over thousands of real-rule URLs (see .e2e/oracle*.mjs).
 
-function onRuleMatchedDebugListener(info) {
-    const { request, rule } = info;
-    if ( request === undefined || rule === undefined ) { return; }
-    recordRequest(request, {
-        source: 'dnr',
-        verdict: 'direct',
-        matchedRule: { rulesetId: rule.rulesetId, ruleId: rule.ruleId },
-    });
-    // Mark the initiating document/frame as a would-block origin so derived
-    // requests can be attributed (coarse lineage).
-    store.markWouldBlock(request);
+let matcher = null;
+let matcherPromise = null;
+// Requests observed before the (async-built) matcher is ready are buffered here
+// and replayed once it's available, so the very first page load isn't missed.
+let pendingRequests = [];
+
+async function buildMatcher() {
+    const m = new DNRMatcher();
+    // Static rulesets currently enabled (their JSON ships in the extension).
+    let rulesetIds = [];
+    try {
+        rulesetIds = await getEnabledRulesets();
+    } catch (reason) {
+        ubolErr(`annotation/matcher/rulesets/${reason}`);
+    }
+    await Promise.all(rulesetIds.map(async id => {
+        try {
+            const response = await fetch(`/rulesets/main/${id}.json`);
+            const rules = await response.json();
+            if ( Array.isArray(rules) ) { m.addRuleset(rules, id); }
+        } catch {
+            // Imported/custom lists may not have a main JSON; skip.
+        }
+    }));
+    // Dynamic + session rules (regex/redirect/strict-block etc.), excluding our
+    // own passthrough rules so we don't treat them as blocks.
+    try {
+        const dynamic = await dnr.getDynamicRules();
+        if ( Array.isArray(dynamic) ) {
+            m.addRuleset(dynamic.filter(r => isPassthroughRule(r) === false), '_dynamic');
+        }
+    } catch {
+    }
+    try {
+        const session = await dnr.getSessionRules();
+        if ( Array.isArray(session) ) {
+            m.addRuleset(session.filter(r => isPassthroughRule(r) === false), '_session');
+        }
+    } catch {
+    }
+    m.finalize();
+    ubolLog(`annotation: matcher built with ${m.ruleCount} rules`);
+    return m;
+}
+
+function isPassthroughRule(rule) {
+    return rule.id === PASSTHROUGH_RULE_ID || rule.id === PASSTHROUGH_RULE_ID + 1;
+}
+
+async function ensureMatcher() {
+    if ( matcher !== null ) { return matcher; }
+    if ( matcherPromise === null ) {
+        matcherPromise = buildMatcher().then(m => {
+            matcher = m;
+            // Replay any requests observed while the matcher was building.
+            const pending = pendingRequests;
+            pendingRequests = [];
+            for ( const details of pending ) {
+                evaluateRequest(details);
+            }
+            return m;
+        });
+    }
+    return matcherPromise;
+}
+
+function teardownMatcher() {
+    matcher = null;
+    matcherPromise = null;
+    pendingRequests = [];
+}
+
+/******************************************************************************/
+
+// Map a webRequest resourceType to a DNR resourceType. They largely coincide;
+// this guards the few naming differences across browsers.
+function dnrTypeFromWebRequest(type) {
+    switch ( type ) {
+    case 'main_frame': return 'main_frame';
+    case 'sub_frame': return 'sub_frame';
+    case 'stylesheet': return 'stylesheet';
+    case 'script': return 'script';
+    case 'image':
+    case 'imageset': return 'image';
+    case 'font': return 'font';
+    case 'object':
+    case 'object_subrequest': return 'object';
+    case 'xmlhttprequest': return 'xmlhttprequest';
+    case 'ping':
+    case 'beacon': return 'ping';
+    case 'csp_report': return 'csp_report';
+    case 'media': return 'media';
+    case 'websocket': return 'websocket';
+    case 'webtransport': return 'webtransport';
+    case 'webbundle': return 'webbundle';
+    default: return 'other';
+    }
+}
+
+// Firefox exposes the initiator via `originUrl`/`documentUrl`; Chromium via
+// `initiator`.
+function initiatorFromDetails(details) {
+    return details.initiator || details.originUrl || details.documentUrl || '';
 }
 
 /******************************************************************************/
@@ -158,7 +253,42 @@ function onRuleMatchedDebugListener(info) {
 const webRequest = webext.webRequest;
 
 function onBeforeRequestListener(details) {
-    if ( store.noteFrameLineage(details) ) {
+    // Buffer requests seen before the async matcher finishes building; they are
+    // replayed in ensureMatcher() once it's ready.
+    if ( matcher === null ) {
+        if ( networkListening ) { pendingRequests.push(details); }
+        return;
+    }
+    evaluateRequest(details);
+}
+
+function evaluateRequest(details) {
+    if ( matcher === null ) { return; }
+    const req = {
+        url: details.url,
+        type: dnrTypeFromWebRequest(details.type),
+        method: details.method,
+        initiator: initiatorFromDetails(details),
+        tabId: details.tabId,
+    };
+    // Direct would-be-blocked: our matcher reproduces the DNR verdict that the
+    // passthrough rule is currently masking.
+    const verdict = matcher.match(req);
+    const wouldBlock = verdict !== null &&
+        (verdict.action === 'block' || verdict.action === 'redirect');
+    if ( wouldBlock ) {
+        recordRequest(details, {
+            source: 'dnr',
+            verdict: 'direct',
+            matchedRule: { rulesetId: verdict.rulesetId, ruleId: verdict.ruleId },
+        });
+        // A would-be-blocked (sub-)frame navigation seeds coarse derivation for
+        // every resource inside that frame.
+        store.markWouldBlock(details);
+    }
+    // Coarse derived attribution: a request inside a would-block frame that
+    // wasn't itself a direct hit is a derived would-be-blocked resource.
+    if ( wouldBlock === false && store.noteFrameLineage(details) ) {
         recordDerivedRequest(details);
     }
 }
@@ -217,21 +347,18 @@ async function removePassthroughRule() {
 
 function startNetworkCapture() {
     if ( networkListening ) { return; }
-    if ( dnr.onRuleMatchedDebug instanceof Object === false ) {
-        ubolLog('annotation: onRuleMatchedDebug unavailable (need feedback perm)');
-        return;
-    }
-    dnr.onRuleMatchedDebug.addListener(onRuleMatchedDebugListener);
+    // Register the observer first so no request is missed, then kick off the
+    // async matcher build. Requests seen before it's ready are buffered and
+    // replayed (see ensureMatcher / onBeforeRequestListener).
     startWebRequestObserver();
     networkListening = true;
+    ensureMatcher();
 }
 
 function stopNetworkCapture() {
     if ( networkListening === false ) { return; }
-    if ( dnr.onRuleMatchedDebug instanceof Object ) {
-        dnr.onRuleMatchedDebug.removeListener(onRuleMatchedDebugListener);
-    }
     stopWebRequestObserver();
+    teardownMatcher();
     networkListening = false;
 }
 

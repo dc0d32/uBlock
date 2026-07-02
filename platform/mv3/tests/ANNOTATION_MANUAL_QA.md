@@ -1,19 +1,62 @@
-# Annotation (audit) mode — manual QA checklist
+# Annotation (audit) mode — testing & QA
 
-The pure data layer (`platform/mv3/extension/js/annotation-store.js`) is covered
-by automated unit tests:
+## How the network side works (Design B)
+
+Annotation mode must let the page load **unblocked** (so ads/scripts run and
+derived resources appear) while still reporting what DNR *would* have blocked.
+MV3 makes these mutually exclusive through the DNR engine (an enabled ruleset is
+an enforcing ruleset, and a top-priority `allowAllRequests` passthrough — needed
+to unblock — masks every real verdict, so `onRuleMatchedDebug`/`testMatchOutcome`
+only ever report the passthrough).
+
+So annotation mode:
+1. installs a top-priority `allowAllRequests` + `allow` **passthrough** session
+   rule → the page loads fully unblocked;
+2. observes every request with non-blocking `webRequest.onBeforeRequest`;
+3. re-computes the would-be verdict in JS with **`dnr-matcher.js`**, evaluating
+   the same ruleset data uBOL ships (static rulesets + dynamic/session rules,
+   minus the passthrough).
+
+`dnr-matcher.js` is validated two ways:
+- **Unit tests** (`platform/mv3/tests/dnr-matcher.test.js`) — pure logic.
+- **Oracle cross-check** against Chrome's own
+  `declarativeNetRequest.testMatchOutcome` over thousands of real-rule URLs
+  (`.e2e/oracle*.mjs`) — 100% agreement on all sub-resource types.
+
+## Automated tests
+
+Unit tests (no browser, run anywhere):
 
 ```sh
-npm run test:mv3          # or: node --test "platform/mv3/tests/**/*.test.js"
+npm run test:mv3          # node --test "platform/mv3/tests/**/*.test.js"
 ```
 
-Everything else in annotation mode is browser-runtime code (content-script
-injection, DNR `onRuleMatchedDebug`, non-blocking `webRequest`, the
-`chrome.debugger`/CDP path, the MAIN-world `postMessage` bridge, and
-service-worker session persistence) and has no Node harness. Verify it manually
-with an **unpacked developer build**, which is the only build where annotation
-mode is available (it needs `declarativeNetRequestFeedback`, added by
-`tools/make-mv3.sh` only for local/dev builds).
+End-to-end (headless Chromium via Puppeteer) — validates the full pipeline
+(extension loads, annotation mode toggles, real pages get flagged). Requires a
+Chromium binary and `puppeteer-core`. On NixOS:
+
+```sh
+nix-shell -p chromium --run 'command -v chromium'   # get a chromium path
+npm install --no-save puppeteer-core
+# .e2e/chrome-path.txt holds the chromium binary path used by the harness
+node .e2e/annotation-e2e.mjs      # loads ext, enables mode, hits canyoublockit.com
+node .e2e/oracle.mjs              # matcher vs Chrome testMatchOutcome (curated)
+node .e2e/oracle-fuzz.mjs         # matcher vs oracle, randomized real-rule URLs
+```
+
+The e2e harness lives under `.e2e/` (gitignored; environment-specific chromium
+path). It asserts, on canyoublockit.com simple + extreme: every tracker the page
+actually loads is flagged, first-party assets are not, verdicts/records are
+shaped correctly, `data-ubol-*` element tags exist, and `window.__ubolAudit` is
+present.
+
+## Manual QA
+
+The remaining runtime pieces (content-script injection, the MAIN-world
+`postMessage` bridge, the `chrome.debugger`/CDP precise-initiator path, and
+service-worker session persistence) are best spot-checked manually with an
+**unpacked developer build** (annotation mode is dev/sideloaded only; the dev
+build adds `webRequest` + `debugger` via `tools/make-mv3.sh`).
 
 ## Build & load
 

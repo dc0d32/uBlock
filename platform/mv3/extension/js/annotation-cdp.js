@@ -96,6 +96,13 @@ async function attachTab(tabId) {
     attachedTabs.add(tabId);
     try {
         await dbg.attach({ tabId }, PROTOCOL_VERSION);
+        // Anti-detection invariant: enable ONLY the Network domain. Do NOT
+        // enable Runtime or Debugger. Pages commonly detect a CDP client by
+        // (a) timing a `debugger;` statement (fires only when the Debugger
+        // domain is enabled) or (b) logging an object with a getter (fires only
+        // when the Runtime domain serializes console args). Enabling just
+        // Network avoids both, so this attach is not observable via those
+        // techniques. Keep it this way.
         await dbg.sendCommand({ tabId }, 'Network.enable', {});
     } catch (reason) {
         attachedTabs.delete(tabId);
@@ -124,6 +131,32 @@ async function attachAllTabs() {
     }
 }
 
+// Attach as soon as a tab begins navigating so we capture its requests from the
+// start. Without this, tabs opened *after* precise-initiators is enabled would
+// never be attached (and thus produce no initiator chains).
+function onTabUpdated(tabId, changeInfo) {
+    if ( active === false ) { return; }
+    if ( changeInfo.status !== 'loading' ) { return; }
+    if ( /^https?:/.test(changeInfo.url || '') === false && changeInfo.url !== undefined ) {
+        return;
+    }
+    attachTab(tabId);
+}
+
+function installTabListeners() {
+    if ( webext.tabs?.onUpdated?.addListener ) {
+        if ( webext.tabs.onUpdated.hasListener(onTabUpdated) === false ) {
+            webext.tabs.onUpdated.addListener(onTabUpdated);
+        }
+    }
+}
+
+function removeTabListeners() {
+    if ( webext.tabs?.onUpdated?.removeListener ) {
+        webext.tabs.onUpdated.removeListener(onTabUpdated);
+    }
+}
+
 /******************************************************************************/
 
 export async function startPreciseInitiators() {
@@ -138,6 +171,7 @@ export async function startPreciseInitiators() {
         dbg.onDetach.addListener(onDetach);
         listenersInstalled = true;
     }
+    installTabListeners();
     await attachAllTabs();
     return true;
 }
@@ -145,6 +179,7 @@ export async function startPreciseInitiators() {
 export async function stopPreciseInitiators() {
     if ( active === false ) { return; }
     active = false;
+    removeTabListeners();
     const tabIds = Array.from(attachedTabs);
     await Promise.all(tabIds.map(detachTab));
 }
