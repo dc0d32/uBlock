@@ -35,8 +35,8 @@ export const rulesetConfig = {
     strictBlockMode: webextFlavor !== 'safari',
     popupBlockMode: true,
     developerMode: false,
-    annotationMode: false,
-    preciseInitiators: false,
+    annotationMode: true,
+    preciseInitiators: true,
     domDerivation: true,
     hasBroadHostPermissions: true,
 };
