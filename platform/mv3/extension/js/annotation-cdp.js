@@ -111,12 +111,24 @@ async function attachTab(tabId) {
         // extension is debugging it), so the tab already has a debuggee client.
         // Log those quietly; only report genuinely unexpected failures.
         const msg = `${reason}`;
-        if ( /already attached|Cannot attach|Cannot access|No tab with id|target is closing/i.test(msg) ) {
+        if ( /already attached|cannot attach|cannot access|cannot be scripted|no tab with id|target is closing|no target with given id|detached/i.test(msg) ) {
             ubolLog(`annotation/cdp: skipping tab ${tabId} (${msg})`);
         } else {
             ubolErr(`annotation/cdp/attach/${msg}`);
         }
     }
+}
+
+// Some https pages cannot be debugged/scripted (e.g. the Chrome Web Store /
+// extensions gallery). Skip them so we never attempt an attach that will fail.
+function isDebuggableUrl(url) {
+    if ( typeof url !== 'string' || url === '' ) { return true; }
+    if ( /^https?:\/\//i.test(url) === false ) { return false; }
+    let hostname;
+    try { hostname = new URL(url).hostname; } catch { return false; }
+    if ( hostname === 'chromewebstore.google.com' ) { return false; }
+    if ( hostname === 'chrome.google.com' ) { return false; }
+    return true;
 }
 
 async function detachTab(tabId) {
@@ -136,19 +148,21 @@ async function attachAllTabs() {
     } catch {
     }
     for ( const tab of tabs ) {
-        if ( typeof tab.id === 'number' ) { attachTab(tab.id); }
+        if ( typeof tab.id !== 'number' ) { continue; }
+        if ( isDebuggableUrl(tab.url) === false ) { continue; }
+        attachTab(tab.id);
     }
 }
 
 // Attach as soon as a tab begins navigating so we capture its requests from the
 // start. Without this, tabs opened *after* precise-initiators is enabled would
 // never be attached (and thus produce no initiator chains).
-function onTabUpdated(tabId, changeInfo) {
+function onTabUpdated(tabId, changeInfo, tab) {
     if ( active === false ) { return; }
     if ( changeInfo.status !== 'loading' ) { return; }
-    if ( /^https?:/.test(changeInfo.url || '') === false && changeInfo.url !== undefined ) {
-        return;
-    }
+    const url = changeInfo.url || (tab && tab.url) || '';
+    if ( /^https?:/.test(url) === false && url !== '' ) { return; }
+    if ( isDebuggableUrl(url) === false ) { return; }
     attachTab(tabId);
 }
 
