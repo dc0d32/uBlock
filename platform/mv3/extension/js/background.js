@@ -440,6 +440,7 @@ async function onMessage(request, sender) {
             developerMode: rulesetConfig.developerMode,
             annotationMode: rulesetConfig.annotationMode,
             preciseInitiators: rulesetConfig.preciseInitiators,
+            domDerivation: rulesetConfig.domDerivation,
             annotationModeAvailable: isAnnotationModeAvailable(),
             disabledFeatures,
             supportsCompiledFilters: supportsOffscreenDocument,
@@ -503,6 +504,16 @@ async function onMessage(request, sender) {
 
     case 'setPreciseInitiators':
         return setPreciseInitiators(request.state);
+
+    case 'setDomDerivation': {
+        rulesetConfig.domDerivation = request.state === true;
+        await saveRulesetConfig();
+        // Re-register so the MAIN-world derivation hooks are injected (or not)
+        // on subsequent page loads.
+        await registerContentScripts();
+        broadcastMessage({ domDerivation: rulesetConfig.domDerivation });
+        return rulesetConfig.domDerivation;
+    }
 
     case 'getAuditData':
         return getAuditData(request.tabId);

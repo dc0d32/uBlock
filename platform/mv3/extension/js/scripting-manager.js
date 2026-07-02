@@ -321,9 +321,16 @@ function registerAudit(context) {
         matches: [ '<all_urls>' ],
         runAt: 'document_start',
     });
+    const mainWorldJs = [ '/js/scripting/audit-page.js' ];
+    // DOM derivation hooks (opt-in): injected right after the page mirror so it
+    // can use the shared state audit-page.js publishes. Injection-gated, so when
+    // the setting is off the DOM-insertion methods are not wrapped at all.
+    if ( rulesetConfig.domDerivation === true ) {
+        mainWorldJs.push('/js/scripting/audit-derive.js');
+    }
     const mainWorldDirective = {
         id: 'audit-page',
-        js: [ '/js/scripting/audit-page.js' ],
+        js: mainWorldJs,
         allFrames: true,
         matches: [ '<all_urls>' ],
         runAt: 'document_start',

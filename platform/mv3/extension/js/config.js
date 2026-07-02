@@ -37,6 +37,7 @@ export const rulesetConfig = {
     developerMode: false,
     annotationMode: false,
     preciseInitiators: false,
+    domDerivation: true,
     hasBroadHostPermissions: true,
 };
 

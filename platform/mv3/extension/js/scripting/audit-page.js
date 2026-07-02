@@ -96,19 +96,24 @@
     };
 
     // Set of would-be-blocked script URLs, mirrored from the network audit and
-    // used to attribute DOM nodes to the script that inserted them.
+    // used to attribute DOM nodes to the script that inserted them. The DOM
+    // derivation hooks live in a separate content script (audit-derive.js) that
+    // is injected only when the "DOM derivation" setting is on; we publish the
+    // set and a list of resolver callbacks for it to use.
     const wouldBlockScripts = new Set();
-    const derivation = installDomDerivation(wouldBlockScripts);
+    self.__ubolAuditShared = { wouldBlockScripts, resolvers: new Set() };
     const refreshWouldBlockScripts = network => {
         for ( const r of network ) {
             if ( r && r.type === 'script' && r.url ) {
                 wouldBlockScripts.add(r.url);
             }
         }
-        // Runs each network poll (~1s): attributes nodes inserted before their
-        // script was known to be blocked (closes the race) and expires stale
-        // buffered entries so removed nodes can be garbage-collected.
-        derivation.resolvePending();
+        // Runs each network poll (~1s): lets the derivation hooks (if present)
+        // attribute nodes inserted before their script was known to be blocked
+        // (closes the race) and expire stale buffered entries.
+        for ( const resolve of self.__ubolAuditShared.resolvers ) {
+            try { resolve(); } catch {}
+        }
     };
 
     window.addEventListener('message', ev => {
@@ -123,197 +128,3 @@
     });
 })();
 
-/******************************************************************************/
-
-// DOM derivation: when a would-be-blocked script (allowed to run in annotation
-// mode) inserts DOM nodes, tag those nodes `data-ubol-derived="<script-url>"`.
-//
-// There is no browser API that reports which script mutated the DOM, so we wrap
-// the common node-insertion methods and, at insertion time, walk the current JS
-// call stack (`Error().stack`) for script URLs. If any is already known to be
-// would-be-blocked, we tag immediately; otherwise the insertion's stack URLs
-// are held in a short-lived rolling buffer and re-checked whenever the network
-// audit learns a new would-be-blocked script — so nodes inserted *before* we
-// knew the script was blocked still get tagged (closes the early-load race).
-//
-// This runs only in annotation mode (this content script is injected only
-// then). Wrappers always call through to the native method and never throw, so
-// page behavior is unchanged.
-
-function installDomDerivation(wouldBlockScripts) {
-    const DERIVED_ATTR = 'data-ubol-derived';
-    const reStackUrl = /(https?:\/\/[^\s()]+?):\d+:\d+/g;
-
-    // Rolling buffer of recent insertions not yet attributed: each entry holds
-    // the inserted nodes plus the script URLs seen in the insertion's call
-    // stack. Bounded in size and age so memory stays flat; a blocked script is
-    // learned within ~1 network-poll of its request, well inside the window.
-    const pending = [];
-    const PENDING_MAX = 6000;
-    const PENDING_TTL = 10000;
-
-    // All script URLs in the current call stack (may be empty).
-    const scriptUrlsInStack = () => {
-        let stack;
-        try { stack = new Error().stack || ''; } catch { return []; }
-        const urls = [];
-        reStackUrl.lastIndex = 0;
-        let m;
-        while ( (m = reStackUrl.exec(stack)) !== null ) {
-            urls.push(m[1]);
-        }
-        return urls;
-    };
-
-    // The first would-be-blocked URL among a list, or ''.
-    const firstBlocking = urls => {
-        for ( const u of urls ) {
-            if ( wouldBlockScripts.has(u) ) { return u; }
-        }
-        return '';
-    };
-
-    const tagOne = (node, url) => {
-        if ( node instanceof Element === false ) { return; }
-        try {
-            if ( node.hasAttribute(DERIVED_ATTR) === false ) {
-                node.setAttribute(DERIVED_ATTR, url);
-            }
-        } catch {
-        }
-    };
-
-    // Tag an inserted node (Element) or the element children of a fragment.
-    const tagInserted = (node, url) => {
-        if ( node instanceof DocumentFragment ) {
-            for ( const child of node.children ) { tagOne(child, url); }
-        } else {
-            tagOne(node, url);
-        }
-    };
-
-    // Handle an insertion of `nodes` (array of node-ish values): tag now if a
-    // blocking script is already known to be in `urls`; otherwise buffer the
-    // insertion so it can be attributed once such a script is learned.
-    const handleInsertion = (nodes, urls) => {
-        if ( urls.length === 0 ) { return; }
-        const url = firstBlocking(urls);
-        if ( url !== '' ) {
-            for ( const n of nodes ) { tagInserted(n, url); }
-            return;
-        }
-        // Keep only still-connected element nodes worth revisiting.
-        const kept = [];
-        for ( const n of nodes ) {
-            if ( n instanceof Element || n instanceof DocumentFragment ) { kept.push(n); }
-        }
-        if ( kept.length === 0 ) { return; }
-        if ( pending.length >= PENDING_MAX ) { pending.shift(); }
-        pending.push({ nodes: kept, urls, t: Date.now() });
-    };
-
-    // Re-check buffered insertions against the (now larger) blocked-script set.
-    const resolvePending = () => {
-        if ( pending.length === 0 ) { return; }
-        const cutoff = Date.now() - PENDING_TTL;
-        let w = 0;
-        for ( let r = 0; r < pending.length; r++ ) {
-            const entry = pending[r];
-            if ( entry.t < cutoff ) { continue; }   // expired → drop
-            const url = firstBlocking(entry.urls);
-            if ( url !== '' ) {
-                for ( const n of entry.nodes ) { tagInserted(n, url); }
-                continue;                            // resolved → drop
-            }
-            pending[w++] = entry;                    // keep unresolved
-        }
-        pending.length = w;
-    };
-
-    // Wrap a method whose inserted node(s) are positional arguments.
-    const wrapNodeArgs = (proto, name, argIndices) => {
-        const original = proto[name];
-        if ( typeof original !== 'function' ) { return; }
-        proto[name] = function(...args) {
-            const result = original.apply(this, args);
-            const urls = scriptUrlsInStack();
-            if ( urls.length !== 0 ) {
-                const nodes = argIndices === 'all'
-                    ? args.filter(a => a && typeof a === 'object')
-                    : argIndices.map(i => args[i]);
-                handleInsertion(nodes, urls);
-            }
-            return result;
-        };
-    };
-
-    try {
-        wrapNodeArgs(Node.prototype, 'appendChild', [ 0 ]);
-        wrapNodeArgs(Node.prototype, 'insertBefore', [ 0 ]);
-        wrapNodeArgs(Node.prototype, 'replaceChild', [ 0 ]);
-        wrapNodeArgs(Element.prototype, 'append', 'all');
-        wrapNodeArgs(Element.prototype, 'prepend', 'all');
-        wrapNodeArgs(Element.prototype, 'before', 'all');
-        wrapNodeArgs(Element.prototype, 'after', 'all');
-        wrapNodeArgs(Element.prototype, 'replaceWith', 'all');
-        wrapNodeArgs(Element.prototype, 'insertAdjacentElement', [ 1 ]);
-    } catch {
-    }
-
-    // HTML-string insertion: after the native call, tag the container's element
-    // descendants (they were all produced by the blocking script).
-    const wrapHtmlSetter = (proto, prop) => {
-        const desc = Object.getOwnPropertyDescriptor(proto, prop);
-        if ( desc === undefined || typeof desc.set !== 'function' ) { return; }
-        Object.defineProperty(proto, prop, {
-            configurable: true,
-            enumerable: desc.enumerable,
-            get: desc.get,
-            set(value) {
-                const urls = scriptUrlsInStack();
-                const before = urls.length !== 0 && this instanceof Element
-                    ? new Set(this.children)
-                    : null;
-                desc.set.call(this, value);
-                if ( before !== null ) {
-                    const added = [];
-                    for ( const el of this.children ) {
-                        if ( before.has(el) === false ) { added.push(el); }
-                    }
-                    if ( added.length !== 0 ) { handleInsertion(added, urls); }
-                }
-            },
-        });
-    };
-
-    const wrapInsertAdjacentHTML = () => {
-        const original = Element.prototype.insertAdjacentHTML;
-        if ( typeof original !== 'function' ) { return; }
-        Element.prototype.insertAdjacentHTML = function(position, text) {
-            const urls = scriptUrlsInStack();
-            const scope = (position === 'beforebegin' || position === 'afterend')
-                ? this.parentElement : this;
-            const before = urls.length !== 0 && scope
-                ? new Set(scope.children)
-                : null;
-            const result = original.call(this, position, text);
-            if ( before !== null && scope ) {
-                const added = [];
-                for ( const el of scope.children ) {
-                    if ( before.has(el) === false ) { added.push(el); }
-                }
-                if ( added.length !== 0 ) { handleInsertion(added, urls); }
-            }
-            return result;
-        };
-    };
-
-    try {
-        wrapHtmlSetter(Element.prototype, 'innerHTML');
-        wrapHtmlSetter(Element.prototype, 'outerHTML');
-        wrapInsertAdjacentHTML();
-    } catch {
-    }
-
-    return { resolvePending };
-}

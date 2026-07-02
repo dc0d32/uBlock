@@ -307,6 +307,14 @@
     "message": "Uses the debugger API to resolve exact script-to-script causality for derived would-be-blocked requests. Chromium only; shows a debugging banner while active.",
     "description": "Short description for a checkbox in the options page"
   },
+  "domDerivationLabel": {
+    "message": "Tag DOM nodes added by would-be-blocked scripts",
+    "description": "Label for a checkbox in the options page"
+  },
+  "domDerivationLegend": {
+    "message": "When a would-be-blocked script is allowed to run and inserts DOM nodes, tag those nodes (data-ubol-derived) with the script that added them. Hooks DOM insertion methods in the page, so it is slightly more intrusive.",
+    "description": "Short description for a checkbox in the options page"
+  },
   "settingsBackupRestoreLabel": {
     "message": "Backup",
     "description": "The header text for the back up/restore section"
