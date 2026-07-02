@@ -66,6 +66,21 @@
         }
     };
 
-    self.setInterval(pump, 1000);
+    // Poll quickly during initial page load (when would-be-blocked scripts are
+    // being discovered and may be inserting DOM nodes), then settle to a slower
+    // steady-state interval. The fast early cadence minimizes the window in
+    // which the MAIN-world mirror doesn't yet know a script is would-be-blocked.
+    let fastPolls = 40;   // ~40 * 250ms = first 10s
+    const schedule = ( ) => {
+        if ( stopped ) { return; }
+        const delay = fastPolls > 0 ? 250 : 1000;
+        if ( fastPolls > 0 ) { fastPolls -= 1; }
+        self.setTimeout(async ( ) => {
+            await pump();
+            schedule();
+        }, delay);
+    };
+
     pump();
+    schedule();
 })();
