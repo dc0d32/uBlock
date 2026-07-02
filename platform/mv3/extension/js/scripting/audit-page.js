@@ -25,7 +25,9 @@
 // what uBOL *would* have filtered:
 //   - `.network`  : array of would-be-blocked network records (mirrored from the
 //                   background dataset, which survives navigations/redirects).
-//   - `.getElements()` : the elements tagged with `data-ubol-*` audit attributes.
+//   - `.getElements()` : the elements tagged with `data-ubol-*` audit
+//                   attributes, including those inside open shadow roots and
+//                   same-origin iframes.
 //   - `.report(entry)` : used by audit-aware scriptlets to record a network
 //                   request they would have suppressed (relayed to background).
 //
@@ -43,11 +45,57 @@
         '[data-ubol-derived]',
     ].join(',');
 
+    // Tagged nodes can live inside open shadow roots (e.g. web-component ad
+    // containers) or same-origin iframes. The audit hooks tag those nodes just
+    // fine — they operate on Node/Element.prototype — but a plain
+    // `document.querySelectorAll` stops at shadow/frame boundaries and would
+    // silently miss them. This walker pierces open shadow roots and descends
+    // into same-origin iframe documents so the getters see every tagged node.
+    // Closed shadow roots and cross-origin iframes remain inaccessible by
+    // design (no API exposes them).
+    const queryAllDeep = (root, seen) => {
+        let els;
+        try {
+            els = root.querySelectorAll(ELEMENT_SELECTOR);
+        } catch {
+            els = [];
+        }
+        for ( const el of els ) {
+            seen.add(el);
+        }
+        let all;
+        try {
+            all = root.querySelectorAll('*');
+        } catch {
+            all = [];
+        }
+        for ( const el of all ) {
+            if ( el.shadowRoot ) {
+                queryAllDeep(el.shadowRoot, seen);
+            }
+            if ( el.localName === 'iframe' || el.localName === 'frame' ) {
+                let doc = null;
+                try {
+                    doc = el.contentDocument;
+                } catch {
+                }
+                if ( doc ) {
+                    queryAllDeep(doc, seen);
+                }
+            }
+        }
+        return seen;
+    };
+
+    const collectTagged = ( ) => {
+        return Array.from(queryAllDeep(document, new Set()));
+    };
+
     window.__ubolAudit = {
         network: [],
         // Return the raw tagged elements (backward compatible).
         getElements() {
-            return Array.from(document.querySelectorAll(ELEMENT_SELECTOR));
+            return collectTagged();
         },
         // Return, for each tagged element, the element plus what would have
         // acted on it: the action(s) (hide/remove/remove-attr/remove-class) and
@@ -56,7 +104,7 @@
         //     filters:[{source:'specific', filter:'.ad-banner'}] }
         getElementDetails() {
             const out = [];
-            for ( const el of document.querySelectorAll(ELEMENT_SELECTOR) ) {
+            for ( const el of collectTagged() ) {
                 const actions = {};
                 for ( const name of [ 'hide', 'remove', 'remove-attr', 'remove-class' ] ) {
                     const v = el.getAttribute(`data-ubol-${name}`);
@@ -84,7 +132,8 @@
         },
         // Elements inserted by a would-be-blocked script (DOM derivation).
         getDerivedElements() {
-            return Array.from(document.querySelectorAll('[data-ubol-derived]'))
+            return collectTagged()
+                .filter(el => el.hasAttribute('data-ubol-derived'))
                 .map(el => ({ element: el, derivedFrom: el.getAttribute('data-ubol-derived') }));
         },
         report(entry) {
