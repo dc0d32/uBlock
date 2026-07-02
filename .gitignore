@@ -5,3 +5,9 @@ node_modules/
 /dist/build/
 /tmp/
 .DS_Store
+
+# e2e harness (nix chromium path, gcroot, puppeteer smoke tests)
+.e2e/
+
+# graphify knowledge-graph artifacts (regenerable)
+graphify-out/
