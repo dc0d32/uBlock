@@ -671,7 +671,7 @@ class ProceduralFilterer {
             }
             t0 = t1;
             if ( nodes.length === 0 ) { continue; }
-            this.processNodes(nodes, pselector.action);
+            this.processNodes(nodes, pselector.action, pselector);
         }
 
         this.unprocessNodes(toUnstyle);
@@ -687,13 +687,13 @@ class ProceduralFilterer {
         return styleToken;
     }
 
-    processNodes(nodes, action) {
+    processNodes(nodes, action, pselector) {
         const op = action && action[0] || '';
         const arg = op !== '' ? action[1] : '';
         // Annotation (audit) mode: record what would have happened via
         // `data-ubol-*` attributes instead of hiding/removing/mutating.
         if ( this.annotate ) {
-            return this.annotateNodes(nodes, op, arg);
+            return this.annotateNodes(nodes, op, arg, pselector);
         }
         switch ( op ) {
         case '':
@@ -743,18 +743,28 @@ class ProceduralFilterer {
 
     // Annotation (audit) mode counterpart of processNodes: tag the target
     // nodes describing what a procedural filter *would* have done, without
-    // actually hiding/removing/mutating them.
-    annotateNodes(nodes, op, arg) {
+    // actually hiding/removing/mutating them. Also records the exact procedural
+    // filter (its raw text) as attribution via the shared data-ubol-filter attr.
+    annotateNodes(nodes, op, arg, pselector) {
+        const raw = pselector && pselector.raw || '';
+        const attribute = node => {
+            if ( raw === '' ) { return; }
+            if ( self.cssAPI && typeof self.cssAPI.recordFilter === 'function' ) {
+                self.cssAPI.recordFilter(node, 'procedural', raw);
+            }
+        };
         switch ( op ) {
         case '':
         case 'style':
             for ( const node of nodes ) {
                 node.setAttribute('data-ubol-hide', 'procedural');
+                attribute(node);
             }
             break;
         case 'remove':
             for ( const node of nodes ) {
                 node.setAttribute('data-ubol-remove', 'procedural');
+                attribute(node);
             }
             break;
         case 'remove-attr': {
@@ -765,6 +775,7 @@ class ProceduralFilterer {
                 );
                 if ( names.length === 0 ) { continue; }
                 node.setAttribute('data-ubol-remove-attr', names.join(' '));
+                attribute(node);
             }
             break;
         }
@@ -776,6 +787,7 @@ class ProceduralFilterer {
                 );
                 if ( names.length === 0 ) { continue; }
                 node.setAttribute('data-ubol-remove-class', names.join(' '));
+                attribute(node);
             }
             break;
         }

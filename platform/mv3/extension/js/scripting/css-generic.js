@@ -149,9 +149,11 @@ const processPendingHashes = ( ) => {
 /******************************************************************************/
 
 const exceptPendingSelectors = ( ) => {
-    if ( exceptionSet.size === 0 ) { return pendingSelectors.join(',\n'); }
     const selectorSet = new Set(pendingSelectors.map(a => a.split(',\n')).flat());
-    return Array.from(selectorSet.difference(exceptionSet)).join(',\n');
+    if ( exceptionSet.size !== 0 ) {
+        return Array.from(selectorSet.difference(exceptionSet));
+    }
+    return Array.from(selectorSet);
 };
 
 /******************************************************************************/
@@ -175,7 +177,7 @@ const uBOL_processNodes = ( ) => {
     const styleSheetSelectors = exceptPendingSelectors();
     pendingHashes.clear();
     pendingSelectors.length = 0;
-    if ( styleSheetSelectors === '' ) {
+    if ( styleSheetSelectors.length === 0 ) {
         surveyMissCount += 1;
         if ( surveyCount >= 64 ) {
             if ( (surveyMissCount / surveyCount) >= stopAllRatio ) {
@@ -188,7 +190,7 @@ const uBOL_processNodes = ( ) => {
     surveyMissCount = 0;
     styleSheetTimer = self.requestAnimationFrame(( ) => {
         styleSheetTimer = undefined;
-        self.cssAPI.hide(`${styleSheetSelectors}`, 'generic');
+        self.cssAPI.hide(styleSheetSelectors, 'generic');
     });
 };
 

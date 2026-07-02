@@ -150,7 +150,7 @@ if ( since > 1 ) {
 const { s, p } = cacheEntry;
 
 if ( s.length !== 0 ) {
-    self.cssAPI.hide(`${s.join(',\n')}`, 'specific');
+    self.cssAPI.hide(s, 'specific');
 }
 
 if ( p.length === 0 ) { return; }

@@ -44,8 +44,39 @@
 
     window.__ubolAudit = {
         network: [],
+        // Return the raw tagged elements (backward compatible).
         getElements() {
             return Array.from(document.querySelectorAll(ELEMENT_SELECTOR));
+        },
+        // Return, for each tagged element, the element plus what would have
+        // acted on it: the action(s) (hide/remove/remove-attr/remove-class) and
+        // the exact filters that matched, e.g.
+        //   { element, actions:{hide:['specific']},
+        //     filters:[{source:'specific', filter:'.ad-banner'}] }
+        getElementDetails() {
+            const out = [];
+            for ( const el of document.querySelectorAll(ELEMENT_SELECTOR) ) {
+                const actions = {};
+                for ( const name of [ 'hide', 'remove', 'remove-attr', 'remove-class' ] ) {
+                    const v = el.getAttribute(`data-ubol-${name}`);
+                    if ( v !== null ) { actions[name] = v.split(/\s+/); }
+                }
+                let filters = [];
+                try {
+                    filters = JSON.parse(el.getAttribute('data-ubol-filter') || '[]');
+                } catch {
+                }
+                out.push({ element: el, actions, filters });
+            }
+            return out;
+        },
+        // Convenience: the filter attribution for a single element.
+        getFilters(el) {
+            try {
+                return JSON.parse(el.getAttribute('data-ubol-filter') || '[]');
+            } catch {
+                return [];
+            }
         },
         report(entry) {
             try {
