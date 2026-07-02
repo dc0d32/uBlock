@@ -34,6 +34,19 @@ import {
 } from './mode-manager.js';
 
 import {
+    ackAuditWal,
+    getAuditData,
+    getAuditWal,
+    initAnnotation,
+    isAnnotationModeAvailable,
+    recordAuditElements,
+    recordScriptletRequest,
+    resetAudit,
+    setAnnotationMode,
+    setPreciseInitiators,
+} from './annotation.js';
+
+import {
     addCustomFilters,
     customFiltersFromHostname,
     getAllCustomFilters,
@@ -99,16 +112,6 @@ import {
     updateSessionRules,
     updateUserRules,
 } from './ruleset-manager.js';
-
-import {
-    getAuditData,
-    initAnnotation,
-    isAnnotationModeAvailable,
-    recordScriptletRequest,
-    resetAudit,
-    setAnnotationMode,
-    setPreciseInitiators,
-} from './annotation.js';
 
 import {
     getConsoleOutput,
@@ -368,6 +371,13 @@ async function onMessage(request, sender) {
         return;
     }
 
+    case 'recordAuditElements':
+        return recordAuditElements({
+            tabId: sender?.tab?.id ?? -1,
+            frameId: sender?.frameId ?? -1,
+            documentId: sender?.documentId ?? '',
+        }, request.records);
+
     default:
         break;
     }
@@ -517,6 +527,12 @@ async function onMessage(request, sender) {
 
     case 'getAuditData':
         return getAuditData(request.tabId);
+
+    case 'getAuditWal':
+        return getAuditWal(request.sinceSeq);
+
+    case 'ackAuditWal':
+        return ackAuditWal(request.uptoSeq);
 
     case 'resetAudit':
         resetAudit(request.tabId);

@@ -49,6 +49,12 @@ export function requestKey(details) {
 //   timeStamp,
 // }
 
+/******************************************************************************/
+
+// Upper bound on retained DOM-annotation records per tab (in-memory store).
+// The durable WAL (annotation-wal.js) has its own, larger bound.
+const ELEMENT_CAP_PER_TAB = 20000;
+
 export class AuditStore {
     constructor() {
         // Map<tabId, {
@@ -64,6 +70,11 @@ export class AuditStore {
             requests: new Map(),
             docs: new Map(),
             wouldBlockFrames: new Set(),
+            // Map<uid, ElementRecord> of DOM annotations reported at tag-time by
+            // the in-page sink (see audit-page.js). Durable per tab so a reader
+            // sees every tagged node — including ones in cross-origin iframes or
+            // shadow roots that a later DOM walk could no longer reach.
+            elements: new Map(),
         };
     }
 
@@ -112,6 +123,32 @@ export class AuditStore {
         return record;
     }
 
+    // Record a DOM-annotation ("element") event reported at tag-time by the
+    // in-page sink. `record.uid` uniquely identifies the tag event (so the live
+    // CDP stream and the WAL replay dedup to the same entry). A 'remove' event
+    // for an already-known uid upgrades the stored record (keeps the richer
+    // removal snapshot). Capped per tab so a pathological page can't grow the
+    // store without bound.
+    recordElement(record) {
+        if ( record instanceof Object === false ) { return; }
+        const tabId = record.tabId;
+        if ( typeof tabId !== 'number' || tabId < 0 ) { return; }
+        const uid = record.uid;
+        if ( typeof uid !== 'string' || uid === '' ) { return; }
+        const entry = this.tabEntry(tabId, true);
+        const existing = entry.elements.get(uid);
+        if ( existing !== undefined && record.event !== 'remove' ) { return; }
+        entry.elements.set(uid, record);
+        const overflow = entry.elements.size - ELEMENT_CAP_PER_TAB;
+        if ( overflow > 0 ) {
+            const it = entry.elements.keys();
+            for ( let i = 0; i < overflow; i++ ) {
+                entry.elements.delete(it.next().value);
+            }
+        }
+        return record;
+    }
+
     // Mark the frame/document of a would-be-blocked navigation so that requests
     // inside it can later be attributed as derived (coarse frame lineage).
     markWouldBlock(request) {
@@ -149,11 +186,12 @@ export class AuditStore {
     getAuditData(tabId) {
         const entry = this.byTab.get(tabId);
         if ( entry === undefined ) {
-            return { requests: [], docs: [] };
+            return { requests: [], docs: [], elements: [] };
         }
         return {
             requests: Array.from(entry.requests.values()),
             docs: Array.from(entry.docs.entries()),
+            elements: Array.from(entry.elements.values()),
         };
     }
 
@@ -185,6 +223,7 @@ export class AuditStore {
                 requests: Array.from(entry.requests.values()),
                 docs: Array.from(entry.docs.entries()),
                 wouldBlockFrames: Array.from(entry.wouldBlockFrames),
+                elements: Array.from(entry.elements.values()),
             };
         }
         return out;
@@ -203,6 +242,11 @@ export class AuditStore {
             }
             for ( const frameId of snapshot.wouldBlockFrames || [] ) {
                 entry.wouldBlockFrames.add(frameId);
+            }
+            for ( const rec of snapshot.elements || [] ) {
+                if ( rec && typeof rec.uid === 'string' ) {
+                    entry.elements.set(rec.uid, rec);
+                }
             }
             this.byTab.set(parseInt(tabId, 10), entry);
         }

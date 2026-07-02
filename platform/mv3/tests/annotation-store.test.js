@@ -299,3 +299,50 @@ describe('chainTracesToWouldBlock', () => {
         assert.equal(chainTracesToWouldBlock([ 'a' ], null), false);
     });
 });
+
+/******************************************************************************/
+
+describe('AuditStore.recordElement', () => {
+    it('stores element records and returns them from getAuditData', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: 1, uid: 'f:1', event: 'tag', tag: 'div' });
+        store.recordElement({ tabId: 1, uid: 'f:2', event: 'tag', tag: 'span' });
+        const data = store.getAuditData(1);
+        assert.equal(data.elements.length, 2);
+        assert.deepEqual(data.elements.map(e => e.uid), [ 'f:1', 'f:2' ]);
+    });
+    it('dedups by uid; a repeat tag does not overwrite', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: 1, uid: 'f:1', event: 'tag', tag: 'div' });
+        store.recordElement({ tabId: 1, uid: 'f:1', event: 'tag', tag: 'CHANGED' });
+        assert.equal(store.getAuditData(1).elements[0].tag, 'div');
+    });
+    it('a remove event upgrades an existing uid', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: 1, uid: 'f:1', event: 'tag', tag: 'div' });
+        store.recordElement({ tabId: 1, uid: 'f:1', event: 'remove', tag: 'div', outerHTMLHead: '<div>' });
+        const rec = store.getAuditData(1).elements[0];
+        assert.equal(rec.event, 'remove');
+        assert.equal(rec.outerHTMLHead, '<div>');
+    });
+    it('ignores records with an invalid tabId or uid', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: -1, uid: 'f:1' });
+        store.recordElement({ tabId: 1 });
+        store.recordElement({ uid: 'f:1' });
+        assert.equal(store.getAuditData(1).elements.length, 0);
+    });
+    it('is included in snapshot/restore round-trip', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: 5, uid: 'f:1', event: 'tag', tag: 'div' });
+        const restored = new AuditStore();
+        restored.restore(JSON.parse(JSON.stringify(store.snapshot())));
+        assert.deepEqual(restored.getAuditData(5).elements.map(e => e.uid), [ 'f:1' ]);
+    });
+    it('reset clears element records for a tab', () => {
+        const store = new AuditStore();
+        store.recordElement({ tabId: 1, uid: 'f:1' });
+        store.reset(1);
+        assert.equal(store.getAuditData(1).elements.length, 0);
+    });
+});

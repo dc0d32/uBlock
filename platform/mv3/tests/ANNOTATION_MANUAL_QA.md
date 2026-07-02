@@ -126,8 +126,23 @@ redirects/reloads/late requests:
 - every would-be-blocked network record, read from the **background** store
   (the cumulative source of truth, keyed by tabId — survives reloads/redirects),
   unioned with each frame's `window.__ubolAudit.network` mirror;
-- every tagged DOM node across **all** frames (top + nested + cross-origin),
-  snapshotted per navigation and deduped.
+- every tagged DOM node across **all** frames (top + nested + cross-origin).
+
+DOM tags are collected from four complementary sinks so nothing is lost to a
+late DOM walk (a node in a cross-origin iframe / closed shadow root / torn-down
+document is still captured):
+
+- **stream (B):** the in-page sink calls `window.__ubolSink()` at tag-time,
+  exposed as a Playwright context binding — delivered synchronously;
+- **store (A):** a durable per-tab background dataset (`getAuditData().elements`);
+- **WAL (C):** a `chrome.storage.local` write-ahead log (`getAuditWal`) that
+  survives tab close and lets the collector replay anything the live stream
+  missed, deduped by record `uid`; drain it with `--ack`;
+- **removal (D):** removed tagged nodes are serialized (`event:"remove"`) before
+  they detach.
+
+Each element in the output carries its `source` (`stream`/`wal`/`store`/`dom`),
+`event`, `actions`, `filters`, and `derivedFrom`.
 
 ```
 pip install playwright
@@ -138,6 +153,6 @@ python platform/mv3/tools/collect_audit.py \
   --url "https://example.com/…" --reload 1 --settle 8 --out audit.json
 ```
 
-Inherent limits: nodes in a **closed** shadow root, or in a **cross-origin
-iframe torn down before a snapshot**, can't be read from the DOM (their network
-telemetry is still captured from the background store).
+Inherent limits: a node in a **closed** shadow root is captured via the in-page
+sink (stream/wal/store) but not by the live DOM snapshot (it has no `source:"dom"`
+entry). Turning annotation mode off, or `--ack`, clears the WAL.

@@ -1,3 +1,61 @@
+<!-- FORK NOTICE -->
+# uBO Lite — Audit Edition (fork)
+
+> This is a fork of [uBlock Origin][gorhill] that adds an **Annotation (Audit)
+> Mode** to uBO Lite (MV3). The upstream README follows unchanged below.
+
+**The idea:** instead of *enforcing* filters, *reveal* them. Audit mode loads the
+page exactly as it normally would — nothing blocked, nothing hidden — while
+recording **everything uBO *would* have filtered**. It's an X‑ray of the ad/track
+layer for researchers, QA, and the merely curious: see what a blocker sees,
+without changing what the page does.
+
+### What's different from upstream
+
+- 🏷️ **Would-be-hidden elements are tagged, not hidden.** Cosmetic filters mark
+  matched nodes with `data-ubol-*` attributes (`hide`/`remove`/`remove-attr`/…)
+  instead of removing them — each **attributed to the exact filter** that matched
+  (`data-ubol-filter`). Walk the live DOM and see precisely what would vanish.
+- 🌐 **Would-be-blocked network requests are logged, not blocked.** A from-scratch
+  **DNR matcher** reproduces Chrome's declarativeNetRequest verdicts (urlFilter +
+  regexFilter, priorities, redirects) while the page loads unblocked — validated
+  against Chrome's own `testMatchOutcome` oracle.
+- 🔗 **Transitive ("derived") attribution.** If a would-be-blocked script is
+  allowed to run and pulls in more resources — or **injects DOM nodes** — those
+  are flagged as *derived* too (`data-ubol-derived`), including a precise
+  initiator chain via an optional, stealth-minimal CDP path.
+- 📡 **Loss-proof telemetry.** Tag events are captured **at tag-time** from inside
+  every frame (even cross-origin iframes and shadow DOM), so nothing is lost to a
+  late DOM walk: a real-time CDP **stream**, a durable per-tab **store**, a
+  `chrome.storage.local` **write-ahead log** (replayable, survives tab close), and
+  **removal capture** (nodes serialized before they detach).
+- 🐍 **One-command collector.** [`platform/mv3/tools/collect_audit.py`](platform/mv3/tools/collect_audit.py)
+  attaches to a real Chrome over CDP and returns every tagged node (all frames) and
+  the full would-be-blocked network log in a single JSON — robust across redirects,
+  reloads, and late/async requests.
+- ⚙️ **Opt-in & sideload-only.** All of the above is gated behind audit mode and the
+  `declarativeNetRequestFeedback` permission (unpacked/dev builds); stable store
+  behavior is unchanged.
+
+### Where to look
+
+| Area | Source |
+| --- | --- |
+| Feature overview, QA checklist, net mechanism | [`platform/mv3/tests/ANNOTATION_MANUAL_QA.md`](platform/mv3/tests/ANNOTATION_MANUAL_QA.md) |
+| Audit orchestration (per-tab dataset, passthrough, capture) | [`platform/mv3/extension/js/annotation.js`](platform/mv3/extension/js/annotation.js) |
+| Pure data layer + element store | [`platform/mv3/extension/js/annotation-store.js`](platform/mv3/extension/js/annotation-store.js) |
+| Would-be-block DNR matcher | [`platform/mv3/extension/js/dnr-matcher.js`](platform/mv3/extension/js/dnr-matcher.js) |
+| Durable element write-ahead log | [`platform/mv3/extension/js/annotation-wal.js`](platform/mv3/extension/js/annotation-wal.js) |
+| In-page mirror + tag sink (stream/store/WAL/removal) | [`platform/mv3/extension/js/scripting/audit-page.js`](platform/mv3/extension/js/scripting/audit-page.js) |
+| DOM derivation hooks | [`platform/mv3/extension/js/scripting/audit-derive.js`](platform/mv3/extension/js/scripting/audit-derive.js) |
+| Precise initiator chains (CDP) | [`platform/mv3/extension/js/annotation-cdp.js`](platform/mv3/extension/js/annotation-cdp.js) |
+| CDP/Playwright collector | [`platform/mv3/tools/collect_audit.py`](platform/mv3/tools/collect_audit.py) |
+| Unit tests | [`platform/mv3/tests/`](platform/mv3/tests/) (`dnr-matcher`, `annotation-store`, `annotation-wal`) |
+
+[gorhill]: https://github.com/gorhill/uBlock
+
+---
+
 [![Badge Commits]][Commit Rate]
 [![Badge Issues]][Issues]
 [![Badge Localization]][Crowdin]

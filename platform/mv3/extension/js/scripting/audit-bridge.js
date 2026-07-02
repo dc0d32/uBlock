@@ -42,12 +42,26 @@
         if ( ev.source !== window ) { return; }
         const data = ev.data;
         if ( data instanceof Object === false ) { return; }
-        if ( data.__ubolAudit !== 'report' ) { return; }
-        if ( data.entry instanceof Object === false ) { return; }
-        chrome.runtime.sendMessage({
-            what: 'recordScriptletRequest',
-            details: data.entry,
-        }).catch(( ) => { });
+        if ( data.__ubolAudit === 'report' ) {
+            if ( data.entry instanceof Object === false ) { return; }
+            chrome.runtime.sendMessage({
+                what: 'recordScriptletRequest',
+                details: data.entry,
+            }).catch(( ) => { });
+            return;
+        }
+        // MAIN -> background: DOM-annotation ("element") events, at tag time.
+        // The durable per-tab store + WAL means a tagged node in a cross-origin
+        // iframe or a torn-down document is captured even if a later DOM walk
+        // could no longer reach it.
+        if ( data.__ubolAudit === 'elements' ) {
+            if ( Array.isArray(data.records) === false ) { return; }
+            chrome.runtime.sendMessage({
+                what: 'recordAuditElements',
+                records: data.records,
+            }).catch(( ) => { });
+            return;
+        }
     });
 
     // background -> MAIN: mirror the would-be-blocked dataset for this tab.

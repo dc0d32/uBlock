@@ -13,11 +13,19 @@ WHAT IT GATHERS (in one run)
     we read the background directly so a just-navigated document (whose mirror
     hasn't re-hydrated yet) can never cause us to miss records. We also union in
     every frame's mirror as belt-and-suspenders.
-  * DOM      -- every tagged node (data-ubol-hide/-remove/-remove-attr/
-    -remove-class/-derived) across ALL frames, including cross-origin iframes.
-    DOM tags are per-document, so a reload/redirect discards the previous
-    document's nodes; we therefore snapshot on every navigation/load and keep a
-    deduped union of everything ever seen in the tab.
+  * DOM      -- every tagged node (data-ubol-*) across ALL frames, including
+    cross-origin iframes. Beyond snapshotting the live DOM, the extension now
+    streams every tag event AT TAG-TIME, so nodes in cross-origin iframes /
+    closed shadow roots / torn-down documents are captured even though a DOM
+    walk could never reach them:
+      - B (stream): the in-page sink calls window.__ubolSink(), exposed here as
+        a Playwright context binding; delivered synchronously so tear-down can't
+        drop it;
+      - A (store) + C (WAL): the background keeps a durable per-tab store and a
+        chrome.storage.local write-ahead log; we read both at the end so any tag
+        the live stream missed (e.g. attached late) is replayed by seq and
+        deduped by uid. The WAL survives tab close; pass --ack to drain it.
+    The live DOM snapshot is kept as a supplement (source:"dom").
 
 WHY PER-FRAME FOR DOM: getElements() already pierces open shadow roots and
 same-origin iframes within its own document, but a cross-origin iframe is a
@@ -26,11 +34,12 @@ touch. CDP/Playwright can evaluate inside each frame's own context, so we call
 getElementDetails() once per frame and merge.
 
 LIMITATIONS (inherent, called out honestly):
-  * Nodes in CLOSED shadow roots or CROSS-ORIGIN iframes that are torn down
-    before we snapshot cannot be recovered (no API exposes a dead document).
-    Network telemetry for them is still captured (it lives in the background).
-  * If you close the tab, the background drops its data. Keep the tab open
-    until collection finishes.
+  * A node in a CLOSED shadow root is streamed/stored via the in-page sink
+    (the extension observes it from the inside), but the live DOM snapshot can't
+    reach it -- so it appears with source stream/wal/store, not "dom".
+  * If you close the tab, the in-memory store is dropped, but the WAL in
+    chrome.storage.local survives -- a later run can still replay it (until you
+    --ack it or turn annotation mode off).
 
 PREREQUISITES
 -------------
@@ -198,6 +207,66 @@ def resolve_tab_id(control_page, marker, url_hint):
     return None
 
 
+def elem_content_sig(rec):
+    """Cross-source signature so a DOM-snapshot element and its durable record
+    (which have no shared uid) are not double-counted."""
+    return "|".join([
+        rec.get("frameUrl") or rec.get("frame") or "",
+        rec.get("selector") or "",
+        json.dumps(rec.get("ubolAttrs") or {}, sort_keys=True),
+    ])
+
+
+def pull_durable_elements(control_page, tab_id, durable, sink_records, do_ack):
+    """Merge the durable element sources (A store + C WAL) and the live stream
+    (B) into `durable`, keyed by uid. Returns a dict of per-source raw uid counts
+    (how many uids each source independently carried) plus the highest WAL seq."""
+    stats = {"store": 0, "wal": 0, "stream": len(sink_records), "max_seq": 0}
+    # A: authoritative in-memory store for this tab.
+    if tab_id is not None:
+        try:
+            data = control_page.evaluate(
+                "async (tabId) => await chrome.runtime.sendMessage("
+                "{ what: 'getAuditData', tabId })", tab_id)
+            for rec in (data or {}).get("elements", []):
+                uid = rec.get("uid")
+                if uid:
+                    stats["store"] += 1
+                    durable.setdefault(uid, dict(rec, _src="store"))
+        except Exception as e:
+            eprint(f"  getAuditData(elements) failed: {e}")
+    # C: WAL replay recovers anything the live stream missed (attached late,
+    # torn-down frame, etc.). Read the whole retained log.
+    try:
+        wal = control_page.evaluate(
+            "async () => await chrome.runtime.sendMessage("
+            "{ what: 'getAuditWal', sinceSeq: 0 })")
+        for rec in (wal or {}).get("records", []):
+            stats["wal"] += 1
+            stats["max_seq"] = max(stats["max_seq"], rec.get("seq", 0))
+            uid = rec.get("uid")
+            if uid:
+                durable.setdefault(uid, dict(rec, _src="wal"))
+        oldest = (wal or {}).get("oldestSeq", 0)
+        if oldest and oldest > 1:
+            eprint(f"  note: WAL rolled over (oldestSeq={oldest}); very early "
+                   f"records may only exist in the live stream.")
+    except Exception as e:
+        eprint(f"  getAuditWal failed: {e}")
+    # B: the live stream (already collected via the binding).
+    for uid, rec in sink_records.items():
+        durable.setdefault(uid, dict(rec, _src="stream"))
+    # Optionally drain the WAL so the next run starts clean.
+    if do_ack and stats["max_seq"] > 0:
+        try:
+            control_page.evaluate(
+                "async (uptoSeq) => await chrome.runtime.sendMessage("
+                "{ what: 'ackAuditWal', uptoSeq })", stats["max_seq"])
+        except Exception as e:
+            eprint(f"  ackAuditWal failed: {e}")
+    return stats
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cdp", default="http://localhost:9222")
@@ -216,10 +285,15 @@ def main():
     ap.add_argument("--max-wait", type=float, default=60.0,
                     help="Hard cap (s) on the final stabilization loop.")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--ack", action="store_true",
+                    help="Acknowledge (drain) the WAL after reading it, so the "
+                         "next run only sees new records.")
     args = ap.parse_args()
 
-    elements_store = {}
+    elements_store = {}    # DOM-snapshot elements, keyed by content (el_key)
     network_store = {}
+    sink_records = {}      # B: live CDP stream, keyed by record uid
+    durable_records = {}   # A/C: background store + WAL, keyed by record uid
 
     with sync_playwright() as pw:
         browser = pw.chromium.connect_over_cdp(args.cdp)
@@ -230,6 +304,24 @@ def main():
             eprint("ERROR: could not find the uBOL extension (service worker). "
                    "Is the dev build loaded?")
             sys.exit(2)
+
+        # B: real-time element stream. The in-page sink calls window.__ubolSink()
+        # at tag-time; exposing it at the CONTEXT level means it's present in
+        # every frame (incl. cross-origin) and every page created afterwards.
+        # Delivered synchronously, so a frame torn down right after tagging is
+        # still captured here even if the DOM walk below can never reach it.
+        def on_sink(source, arg):
+            try:
+                for rec in (arg or {}).get("records", []):
+                    uid = rec.get("uid")
+                    if uid:
+                        sink_records[uid] = rec
+            except Exception:
+                pass
+        try:
+            context.expose_binding("__ubolSink", on_sink)
+        except Exception as e:
+            eprint(f"  note: __ubolSink already exposed or unavailable ({e})")
 
         # --- pick / open the target page -----------------------------------
         page = None
@@ -311,23 +403,48 @@ def main():
         pull_background_network(control, tab_id, network_store)
         snapshot_frames(page, elements_store, network_store)
 
+        # Merge the durable element sources (A store + C WAL + B stream). These
+        # are the loss-proof record of every tag event; the DOM snapshot is a
+        # supplement (live nodes still reachable, useful for live handles).
+        estats = pull_durable_elements(control, tab_id, durable_records,
+                                       sink_records, args.ack)
+
+        # Unified element list: durable records first, then any DOM-snapshot-only
+        # element whose content signature isn't already represented.
+        seen_sigs = set(elem_content_sig(r) for r in durable_records.values())
+        elements = [dict(r, source=r.pop("_src", "durable"))
+                    for r in durable_records.values()]
+        dom_only = 0
+        for e in elements_store.values():
+            if elem_content_sig(e) in seen_sigs:
+                continue
+            elements.append(dict(e, source="dom"))
+            dom_only += 1
+
         result = {
             "page": page.url,
             "tabId": tab_id,
             "frameCount": len(page.frames),
-            "elements": list(elements_store.values()),
+            "sourceStats": estats,
+            "elements": elements,
             "network": list(network_store.values()),
         }
         control.close()
         browser.close()  # detaches CDP; does NOT close your Chrome
 
     derived_dom = [e for e in result["elements"] if e.get("derivedFrom")]
+    removed = [e for e in result["elements"] if e.get("event") == "remove"]
     direct_net = [r for r in result["network"] if r.get("verdict") == "direct"]
     derived_net = [r for r in result["network"] if r.get("verdict") == "derived"]
+    es = result["sourceStats"] or {}
     eprint("---")
     eprint(f"page: {result['page']}")
-    eprint(f"tagged DOM nodes: {len(result['elements'])} "
-           f"({len(derived_dom)} derived) across {result['frameCount']} frames")
+    eprint(f"tagged elements: {len(result['elements'])} "
+           f"({len(derived_dom)} derived, {len(removed)} removed) "
+           f"across {result['frameCount']} frames")
+    eprint(f"  source coverage (raw uids seen per channel): "
+           f"stream(B)={es.get('stream',0)} wal(C)={es.get('wal',0)} "
+           f"store(A)={es.get('store',0)}")
     eprint(f"would-be-blocked network: {len(result['network'])} "
            f"({len(direct_net)} direct, {len(derived_net)} derived)")
 

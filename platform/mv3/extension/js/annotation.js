@@ -41,22 +41,31 @@
 
 import { dnr, webext } from './ext-compat.js';
 import { isSideloaded, ubolErr, ubolLog } from './debug.js';
-import { rulesetConfig, saveRulesetConfig } from './config.js';
 import {
+    localRead,
+    localWrite,
     sessionRead,
     sessionWrite,
 } from './ext.js';
+import { rulesetConfig, saveRulesetConfig } from './config.js';
 import {
     startPreciseInitiators,
     stopPreciseInitiators,
 } from './annotation-cdp.js';
 import { AuditStore } from './annotation-store.js';
+import { AuditWal } from './annotation-wal.js';
 import { DNRMatcher } from './dnr-matcher.js';
 import { getEnabledRulesets } from './ruleset-manager.js';
 
 /******************************************************************************/
 
 const AUDIT_SESSION_KEY = 'annotationAudit';
+
+// Durable element-annotation write-ahead log lives in `chrome.storage.local`
+// (survives service-worker restarts AND tab close), separate from the per-tab
+// session snapshot above. A reader (see tools/collect_audit.py) can replay it
+// by sequence number to recover any tag events the real-time CDP stream missed.
+const AUDIT_WAL_KEY = 'annotationAuditWal';
 
 // Session rule id used to neutralize real blocking while annotation mode is on.
 // A single top-priority `allowAllRequests` rule makes the *net* DNR outcome
@@ -104,6 +113,44 @@ async function restore() {
     } catch {
     }
     store.restore(data);
+}
+
+/******************************************************************************/
+
+// Element write-ahead log (durable, in chrome.storage.local).
+
+const wal = new AuditWal({ cap: 20000 });
+let walDirty = false;
+let walTimer;
+
+async function restoreWal() {
+    let data;
+    try {
+        data = await localRead(AUDIT_WAL_KEY);
+    } catch {
+    }
+    const restored = AuditWal.fromJSON(data, { cap: 20000 });
+    wal.seq = restored.seq;
+    wal.records = restored.records;
+}
+
+function scheduleWalPersist() {
+    walDirty = true;
+    if ( walTimer !== undefined ) { return; }
+    walTimer = setTimeout(( ) => {
+        walTimer = undefined;
+        persistWalNow();
+    }, 1000);
+}
+
+async function persistWalNow() {
+    if ( walDirty === false ) { return; }
+    walDirty = false;
+    try {
+        await localWrite(AUDIT_WAL_KEY, wal.toJSON());
+    } catch (reason) {
+        ubolErr(`annotation/wal/${reason}`);
+    }
 }
 
 /******************************************************************************/
@@ -371,6 +418,41 @@ export function recordScriptletRequest(details) {
     return recordRequest(details, { source: 'scriptlet', verdict: 'direct' });
 }
 
+// Record a batch of DOM-annotation ("element") events reported by the in-page
+// sink for a given sender (tab/frame/document). Each record is stored in the
+// per-tab dataset (so getAuditData exposes it) and appended to the durable WAL
+// (so a reader can replay anything the live CDP stream missed).
+export function recordAuditElements(ctx, records) {
+    if ( Array.isArray(records) === false || records.length === 0 ) { return; }
+    let stored = 0;
+    for ( const record of records ) {
+        if ( record instanceof Object === false ) { continue; }
+        record.tabId = ctx.tabId;
+        record.frameId = ctx.frameId;
+        record.documentId = ctx.documentId;
+        if ( store.recordElement(record) === undefined ) { continue; }
+        wal.append(record);
+        stored += 1;
+    }
+    if ( stored === 0 ) { return; }
+    schedulePersist();
+    scheduleWalPersist();
+    return { seq: wal.seq };
+}
+
+// Read WAL records with seq strictly greater than `sinceSeq`. `oldestSeq` lets a
+// reader detect whether the log rolled over past what it last consumed.
+export function getAuditWal(sinceSeq = 0) {
+    return { seq: wal.seq, oldestSeq: wal.oldestSeq, records: wal.read(sinceSeq) };
+}
+
+// Acknowledge consumption up to `uptoSeq`, dropping those records from the WAL.
+export function ackAuditWal(uptoSeq) {
+    wal.ack(uptoSeq);
+    scheduleWalPersist();
+    return { seq: wal.seq, oldestSeq: wal.oldestSeq };
+}
+
 export function recordDerivedRequest(details, initiatorChain = null) {
     return recordRequest(details, {
         source: 'dnr',
@@ -418,6 +500,10 @@ export async function setAnnotationMode(state) {
         await stopPreciseInitiators();
         await removePassthroughRule();
         resetAudit();
+        // Turning the mode off is a deliberate reset: drop the durable WAL too
+        // so it doesn't carry stale records into a later capture session.
+        wal.clear();
+        scheduleWalPersist();
     }
     await saveRulesetConfig();
     return rulesetConfig.annotationMode;
@@ -449,6 +535,7 @@ if ( webext.tabs && webext.tabs.onRemoved ) {
 // capture after a service-worker wake-up.
 export async function initAnnotation() {
     await restore();
+    await restoreWal();
     if ( rulesetConfig.annotationMode && isAnnotationModeAvailable() ) {
         await installPassthroughRule();
         startNetworkCapture();
