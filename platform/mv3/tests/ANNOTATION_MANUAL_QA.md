@@ -116,3 +116,28 @@ appear only when the build is sideloaded/dev.
 - [ ] Closing the tab drops its dataset; **Reset** in the audit view clears it.
 - [ ] Turning annotation mode OFF restores normal blocking/hiding (passthrough
       DNR rule removed, listeners detached, CDP detached).
+
+## Bulk collection tool (Playwright/CDP)
+
+`platform/mv3/tools/collect_audit.py` attaches to a real Chrome (dev build
+loaded) over CDP and gathers, in one run and without missing telemetry across
+redirects/reloads/late requests:
+
+- every would-be-blocked network record, read from the **background** store
+  (the cumulative source of truth, keyed by tabId — survives reloads/redirects),
+  unioned with each frame's `window.__ubolAudit.network` mirror;
+- every tagged DOM node across **all** frames (top + nested + cross-origin),
+  snapshotted per navigation and deduped.
+
+```
+pip install playwright
+google-chrome --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.chrome-ubol-audit" \
+  --load-extension=/path/to/dist/build/uBOLite.chromium
+python platform/mv3/tools/collect_audit.py \
+  --url "https://example.com/…" --reload 1 --settle 8 --out audit.json
+```
+
+Inherent limits: nodes in a **closed** shadow root, or in a **cross-origin
+iframe torn down before a snapshot**, can't be read from the DOM (their network
+telemetry is still captured from the background store).
