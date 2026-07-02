@@ -106,7 +106,16 @@ async function attachTab(tabId) {
         await dbg.sendCommand({ tabId }, 'Network.enable', {});
     } catch (reason) {
         attachedTabs.delete(tabId);
-        ubolErr(`annotation/cdp/attach/${reason}`);
+        // A failed attach is often an expected condition rather than a bug:
+        // most commonly the user has DevTools open on the tab (or another
+        // extension is debugging it), so the tab already has a debuggee client.
+        // Log those quietly; only report genuinely unexpected failures.
+        const msg = `${reason}`;
+        if ( /already attached|Cannot attach|Cannot access|No tab with id|target is closing/i.test(msg) ) {
+            ubolLog(`annotation/cdp: skipping tab ${tabId} (${msg})`);
+        } else {
+            ubolErr(`annotation/cdp/attach/${msg}`);
+        }
     }
 }
 
