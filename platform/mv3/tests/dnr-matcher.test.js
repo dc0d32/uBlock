@@ -263,3 +263,52 @@ describe('DNRMatcher indexing', () => {
         assert.equal(m.finalized, true);
     });
 });
+
+describe('DNRMatcher — regexFilter rules', () => {
+    it('matches a regexFilter block rule', () => {
+        const m = matcherFrom([
+            { id: 1, priority: 10, action: { type: 'block' },
+              condition: { regexFilter: '^https?://ads\\.[a-z]+/track' } },
+        ]);
+        assert.equal(m.wouldBlock({ url: 'https://ads.com/track', type: 'script' }), true);
+        assert.equal(m.wouldBlock({ url: 'https://safe.com/track', type: 'script' }), false);
+    });
+
+    it('honors isUrlFilterCaseSensitive for regexFilter', () => {
+        const ci = matcherFrom([
+            { id: 1, priority: 10, action: { type: 'block' },
+              condition: { regexFilter: 'ADS' } },
+        ]);
+        assert.equal(ci.wouldBlock({ url: 'https://x.com/ads', type: 'script' }), true);
+        const cs = matcherFrom([
+            { id: 1, priority: 10, action: { type: 'block' },
+              condition: { regexFilter: 'ADS', isUrlFilterCaseSensitive: true } },
+        ]);
+        assert.equal(cs.wouldBlock({ url: 'https://x.com/ads', type: 'script' }), false);
+        assert.equal(cs.wouldBlock({ url: 'https://x.com/ADS', type: 'script' }), true);
+    });
+
+    it('does NOT false-negative when a literal fuses with a quantifier ' +
+       '(serch\\d{2}.biz -> serch77.biz); regex rules are domain-indexed', () => {
+        // Reproduces the real bug: token-indexing "serch" would miss "serch77".
+        const m = matcherFrom([
+            { id: 1, priority: 29, action: { type: 'redirect', redirect: { url: 'x' } },
+              condition: {
+                  regexFilter: '^https://serch\\d{2}\\.biz/\\?p=.*',
+                  resourceTypes: [ 'main_frame' ],
+                  requestDomains: [ 'biz' ],
+              } },
+        ]);
+        assert.equal(m.wouldBlock({ url: 'https://serch77.biz/?p=a', type: 'main_frame' }), true);
+        assert.equal(m.wouldBlock({ url: 'https://serch7.biz/?p=a', type: 'main_frame' }), false);
+    });
+
+    it('skips a regexFilter that is not a valid JS RegExp (no throw)', () => {
+        const m = matcherFrom([
+            { id: 1, priority: 10, action: { type: 'block' },
+              condition: { regexFilter: '(' } },   // invalid
+        ]);
+        assert.equal(m.ruleCount, 0);
+        assert.equal(m.match({ url: 'https://x.com/', type: 'script' }), null);
+    });
+});

@@ -96,6 +96,58 @@ export function reFromUrlFilter(urlFilter, isCaseSensitive = false) {
 
 /******************************************************************************/
 
+// Compile a DNR `regexFilter` (RE2 syntax) into a JS RegExp. DNR regex matching
+// is case-insensitive unless `isCaseSensitive`. RE2 is a subset of JS regex for
+// the constructs uBOL emits (character classes, quantifiers, anchors, \b, \d,
+// groups), so a direct compile works; if a pattern is somehow not a valid JS
+// RegExp we return null and the rule is skipped rather than throwing.
+export function reFromRegexFilter(regexFilter, isCaseSensitive = false) {
+    try {
+        return new RegExp(regexFilter, isCaseSensitive ? '' : 'i');
+    } catch {
+        return null;
+    }
+}
+
+// Conservatively extract indexing tokens from a regex: only literal
+// alphanumeric runs (>= 3 chars) that are GUARANTEED to appear in every match,
+// so indexing by them never yields a false negative. To stay safe we bail out
+// (return []) whenever the pattern contains constructs that could make a literal
+// optional or alternative: a top-level `|`, or any group/char-class/quantifier.
+// Such rules fall back to the generic bucket. A literal run is disqualified if
+// the character immediately after it is a quantifier (?, *, {) that could drop
+// its last char.
+export function safeTokensFromRegex(regexFilter) {
+    // Bail on alternation or groups/classes anywhere: determining which literals
+    // are mandatory then requires real parsing.
+    if ( /\||\(|\[/.test(regexFilter) ) { return []; }
+    // Note: even a "guaranteed" literal run can fuse with adjacent regex-
+    // generated characters in real URLs (e.g. `serch\d{2}` -> "serch77"), which
+    // would break token lookup. Regex rules are therefore not token-indexed at
+    // all (see compileRule); this remains only as a documented helper/spec.
+    const tokens = [];
+    let run = '';
+    for ( let i = 0; i < regexFilter.length; i++ ) {
+        const ch = regexFilter[i];
+        const next = regexFilter[i + 1];
+        if ( /[a-zA-Z0-9]/.test(ch) ) {
+            if ( next === '?' || next === '*' || next === '{' ) {
+                if ( run.length >= 3 ) { tokens.push(run.toLowerCase()); }
+                run = '';
+                continue;
+            }
+            run += ch;
+        } else {
+            if ( run.length >= 3 ) { tokens.push(run.toLowerCase()); }
+            run = '';
+        }
+    }
+    if ( run.length >= 3 ) { tokens.push(run.toLowerCase()); }
+    return tokens;
+}
+
+/******************************************************************************/
+
 // Extract the eTLD+1-ish hostname labels for domain-list matching. DNR
 // `requestDomains`/`initiatorDomains` match a domain or any of its subdomains.
 function hostnameMatchesDomainList(hostname, domains) {
@@ -183,18 +235,33 @@ export class DNRMatcher {
     }
 
     // Compile a single DNR rule into the fast-match form, or null to skip
-    // (rules we don't model, e.g. those with regexFilter — none ship today).
+    // (e.g. a regexFilter that isn't expressible as a JS RegExp).
     static compileRule(rule, rulesetId) {
         const c = rule.condition || {};
-        if ( c.regexFilter ) { return null; }
+        const caseSensitive = c.isUrlFilterCaseSensitive === true;
+        let re = null;
+        let urlTokens = [];
+        if ( c.regexFilter ) {
+            re = reFromRegexFilter(c.regexFilter, caseSensitive);
+            if ( re === null ) { return null; }   // not expressible → skip
+            // Deliberately NOT token-indexed: a literal run in a regex (e.g.
+            // "serch" in `serch\d{2}`) fuses with adjacent generated characters
+            // in real URLs ("serch77"), so token lookup would miss. Regex rules
+            // are instead domain-indexed (when they have request/initiator
+            // domains) or fall back to the generic bucket — never false-negative.
+            urlTokens = [];
+        } else if ( c.urlFilter ) {
+            re = reFromUrlFilter(c.urlFilter, caseSensitive);
+            urlTokens = tokensFromString(c.urlFilter);
+        }
         const compiled = {
             rulesetId,
             ruleId: rule.id,
             priority: rule.priority ?? DEFAULT_PRIORITY,
             action: rule.action,
-            re: c.urlFilter ? reFromUrlFilter(c.urlFilter, c.isUrlFilterCaseSensitive === true) : null,
+            re,
             urlFilter: c.urlFilter || '',
-            urlTokens: c.urlFilter ? tokensFromString(c.urlFilter) : [],
+            urlTokens,
             resourceTypes: c.resourceTypes || null,
             excludedResourceTypes: c.excludedResourceTypes || null,
             requestDomains: c.requestDomains || null,
