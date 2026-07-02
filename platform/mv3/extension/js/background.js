@@ -353,6 +353,21 @@ async function onMessage(request, sender) {
         if ( frameId === false ) { return; }
         return injectCustomFilters(tabId, frameId, request.hostname);
 
+    // Annotation (audit) mode: these come from content scripts on arbitrary
+    // pages (the MAIN-world mirror bridge and audit-aware scriptlets), so they
+    // must be handled before the trusted-origin gate below. Each is scoped to
+    // the sender's own tab.
+    case 'getAuditDataForSelf':
+        return getAuditData(sender?.tab?.id ?? -1);
+
+    case 'recordScriptletRequest': {
+        const stabId = sender?.tab?.id ?? -1;
+        const sframeId = sender?.frameId ?? -1;
+        const sdocumentId = sender?.documentId ?? '';
+        recordScriptletRequest(Object.assign({ tabId: stabId, frameId: sframeId, documentId: sdocumentId }, request.details));
+        return;
+    }
+
     default:
         break;
     }
@@ -492,20 +507,9 @@ async function onMessage(request, sender) {
     case 'getAuditData':
         return getAuditData(request.tabId);
 
-    case 'getAuditDataForSelf':
-        return getAuditData(sender?.tab?.id ?? -1);
-
     case 'resetAudit':
         resetAudit(request.tabId);
         return;
-
-    case 'recordScriptletRequest': {
-        const tabId = sender?.tab?.id ?? -1;
-        const frameId = sender?.frameId ?? -1;
-        const documentId = sender?.documentId ?? '';
-        recordScriptletRequest(Object.assign({ tabId, frameId, documentId }, request.details));
-        return;
-    }
 
     case 'showAuditView':
         browser.windows.create({
