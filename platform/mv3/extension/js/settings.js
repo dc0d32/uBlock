@@ -343,7 +343,7 @@ listen.onmessage = ev => {
         renderWidgets();
     }
     if ( renderLists ) {
-        renderFilterLists();
+        renderFilterLists(true);
     }
 };
 

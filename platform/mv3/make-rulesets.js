@@ -31,6 +31,10 @@ import {
     dnrRulesetFromRawLists,
     mergeRules,
 } from './js/static-dnr-filtering.js';
+import {
+    expandRemoveparamsRule,
+    minimizeRuleset,
+} from './js/ubo-parser.js';
 
 import { execSync } from 'node:child_process';
 import { fetchList } from './js/offscreen/fetch-list.js';
@@ -78,7 +82,6 @@ const env = [
     'mv3',
     'ublock',
     'ubol',
-    'user_stylesheet',
     ...envExtra,
 ];
 
@@ -253,9 +256,9 @@ rePatternFromUrlFilter.restrHostnameAnchor2 = '^[^:]+://([^:/]+)?';
 
 async function fetchListFromCache(assetDetails) {
     const fname = assetDetails.id;
-    logProgress(`Reading locally cached ${fname}`);
+    logProgress(`Reading locally cached ${platform}/${fname}`);
 
-    const content = await fs.readFile(`${cacheDir}/${fname}`,
+    const content = await fs.readFile(`${cacheDir}/${platform}/${fname}`,
         { encoding: 'utf8' }
     ).catch(( ) => { });
     if ( content !== undefined ) {
@@ -270,7 +273,7 @@ async function fetchListFromCache(assetDetails) {
     };
 
     const text = await fetchList(context, assetDetails);
-    writeFile(`${cacheDir}/${fname}`, text);
+    writeFile(`${cacheDir}/${platform}/${fname}`, text);
 
     if ( Boolean(text) === false ) {
         throw 'Filter list should not be empty';
@@ -570,7 +573,6 @@ async function processDnrRules(assetDetails, network, dnrRules) {
     const staticRules = await patchRuleset(
         dnrRules.filter(rule => isGood(rule) && isRegex(rule) === false)
     );
-    log(`\tStatic rules: ${staticRules.length}`);
     log(staticRules
         .filter(rule => Array.isArray(rule._warning))
         .map(rule => rule._warning.map(v => `\t\t${v}`))
@@ -580,7 +582,8 @@ async function processDnrRules(assetDetails, network, dnrRules) {
     const regexRules = await patchRuleset(
         dnrRules.filter(rule => isGood(rule) && isRegex(rule))
     );
-    log(`\tMaybe good (regexes): ${regexRules.length}`);
+    const minimizedRegexRuleset = minimizeRuleset(regexRules);
+    log(`\tMaybe good regexes (raw/minimized): ${regexRules.length}/${minimizedRegexRuleset.length}`);
 
     staticRules.forEach(rule => {
         if ( rule.action.redirect?.extensionPath === undefined ) { return; }
@@ -588,6 +591,17 @@ async function processDnrRules(assetDetails, network, dnrRules) {
             rule.action.redirect.extensionPath.replace(/^\/+/, '')
         );
     });
+
+    // Patch removeParams rules as needed
+    for ( const rule of staticRules ) {
+        if ( rule.action.redirect?.transform?.queryTransform?.removeParams ) {
+            expandRemoveparamsRule(rule, staticRules);
+        }
+    }
+
+    // Minimize rulesets
+    const minimizedStaticRuleset = minimizeRuleset(staticRules);
+    log(`\tStatic rules (raw/minimized): ${staticRules.length}/${minimizedStaticRuleset.length}`);
 
     const urlskips = new Map();
     for ( const rule of dnrRules ) {
@@ -637,12 +651,12 @@ async function processDnrRules(assetDetails, network, dnrRules) {
     log(bad.map(rule => rule._error.map(v => `\t\t${v}`)).join('\n'), true);
 
     writeFile(`${rulesetDir}/main/${assetDetails.id}.json`,
-        toJSONRuleset(staticRules)
+        toJSONRuleset(minimizedStaticRuleset)
     );
 
-    if ( regexRules.length !== 0 ) {
+    if ( minimizedRegexRuleset.length !== 0 ) {
         writeFile(`${rulesetDir}/regex/${assetDetails.id}.json`,
-            toJSONRuleset(regexRules)
+            toJSONRuleset(minimizedRegexRuleset)
         );
     }
 
@@ -653,10 +667,10 @@ async function processDnrRules(assetDetails, network, dnrRules) {
     }
 
     return {
-        total: staticRules.length + regexRules.length,
-        plain: staticRules.length,
+        total: minimizedStaticRuleset.length + minimizedRegexRuleset.length,
+        plain: minimizedStaticRuleset.length,
+        regex: minimizedRegexRuleset.length,
         rejected: bad.length,
-        regex: regexRules.length,
         urlskip: urlskips.size || undefined,
     };
 }
@@ -879,6 +893,7 @@ async function processPopupRules(assetDetails, popupRules) {
         const { condition }  = rule;
         if ( condition.domainType ) { return data; }
         if ( condition.initiatorDomains ) { return data; }
+        if ( condition.excludedInitiatorDomains ) { return data; }
         const { type } = rule.action;
         if ( type !== 'block' && type !== 'allow' ) { return data; }
         const realm = type === 'block' ? data.block : data.allow;
@@ -896,16 +911,32 @@ async function processPopupRules(assetDetails, popupRules) {
             }
             if ( re === undefined ) { return data; }
             const token = literalStrFromRegex(re).slice(0, 7);
-            const key = `${isUrlFilterCaseSensitive ? ' ' : 'i'}${token}`;
-            if ( realm.regexes.has(key) ) {
-                realm.regexes.set(key, `${realm.regexes.get(key)}|${re}`);
-            } else {
-                realm.regexes.set(key, re);
+            const details = realm.regexes.get(token) ?? { token, rules: [] };
+            if ( details.rules.length === 0 ) {
+                realm.regexes.set(token, details)
+            }
+            const entry = { re, f: isUrlFilterCaseSensitive ? '' : 'i' };
+            details.rules.push(entry);
+            if ( condition.requestDomains ) {
+                entry.to = condition.requestDomains.sort(hostnameCompare);
+            }
+            if ( condition.excludedRequestDomains ) {
+                entry.xto = condition.excludedRequestDomains.sort(hostnameCompare);
             }
             return data;
         }
         if ( Array.isArray(condition.requestDomains) ) {
-            realm.hostnames = realm.hostnames.concat(condition.requestDomains);
+            realm.hostnames = realm.hostnames.concat(
+                condition.requestDomains
+            );
+        }
+        // https://github.com/uBlockOrigin/uAssets/issues/33581
+        if ( type === 'block' ) {
+            if ( Array.isArray(condition.excludedRequestDomains) ) {
+                data.allow.hostnames = data.allow.hostnames.concat(
+                    condition.excludedRequestDomains
+                );
+            }
         }
         return data;
     };
@@ -924,9 +955,13 @@ async function processPopupRules(assetDetails, popupRules) {
     const count = data.block.hostnames.length + data.block.regexes.size;
     if ( count === 0 ) { return; }
     data.block.hostnames = data.block.hostnames.toSorted(hostnameCompare);
-    data.block.regexes = Array.from(data.block.regexes).flat();
+    data.block.regexes = Array.from(data.block.regexes.values()).map(a =>
+        [ a.token, JSON.stringify(a.rules) ]
+    ).flat();
     data.allow.hostnames = data.allow.hostnames.toSorted(hostnameCompare);
-    data.allow.regexes = Array.from(data.allow.regexes).flat();
+    data.allow.regexes = Array.from(data.allow.regexes.values()).map(a =>
+        [ a.token, JSON.stringify(a.rules) ]
+    ).flat();
     const originalScriptletMap = await loadAllSourceScriptlets();
     let patchedScriptlet = originalScriptletMap.get(`prevent-popup`);
     patchedScriptlet = safeReplace(patchedScriptlet,

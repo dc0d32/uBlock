@@ -197,11 +197,8 @@ export function compileFilters(listid, text, context = {}) {
         }
         if ( parser.isNetworkFilter() ) {
             filterStats.total += 1;
-            const rule = parseNetworkFilter(parser, {
-                resourceTypes,
-            });
-            if ( rule ) {
-                unminimizedRules.push(rule);
+            const result = parseNetworkFilter(parser, { resourceTypes }, unminimizedRules);
+            if ( result ) {
                 filterStats.accepted += 1;
             } else {
                 filterStats.rejected += 1;
@@ -330,7 +327,6 @@ async function updateList(list) {
             'mv3',
             'ublock',
             'ubol',
-            'user_stylesheet',
         ],
     };
     const asset = { urls: [ list.id ] };
@@ -452,7 +448,7 @@ async function compileImportedList() {
         promises.push(getCompiledListData(list));
     }
     const compiledData = await Promise.all(promises);
-    const toMerge = compiledData.filter(a => Boolean(a));
+    const toMerge = compiledData.filter(a => a);
     if ( toMerge.length === 0 ) { return; }
     const merged = toMerge[0];
     while ( toMerge.length > 1 ) {
