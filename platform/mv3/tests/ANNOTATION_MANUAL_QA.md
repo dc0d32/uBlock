@@ -44,6 +44,31 @@ node .e2e/oracle.mjs              # matcher vs Chrome testMatchOutcome (curated)
 node .e2e/oracle-fuzz.mjs         # matcher vs oracle, randomized real-rule URLs
 ```
 
+Offline smoke test (no npm dependencies, no network required for the cosmetic
+assertions) — loads the *built* extension, serves a local fixture, and asserts
+the two core invariants: generic cosmetic filters **tag** (`data-ubol-hide` +
+`data-ubol-filter`) instead of hiding, and would-be-blocked requests **load**
+while being recorded in `window.__ubolAudit.network`:
+
+```sh
+./tools/make-mv3.sh chromium
+node .e2e/smoke.mjs               # add --headful to watch it
+EXT_DIR=/path/to/unzipped/build node .e2e/smoke.mjs   # validate a shipped zip
+```
+
+> **Chrome 137+ automation caveat.** Chrome removed `--load-extension`, and
+> `Extensions.loadUnpacked` is only exposed over a CDP **pipe**. Harnesses must
+> launch with `--remote-debugging-pipe --enable-unsafe-extension-debugging`
+> (*not* `--remote-debugging-port`) and then call `Extensions.loadUnpacked`;
+> otherwise the extension silently never loads. `.e2e/smoke.mjs` does this.
+
+> **Filtering mode matters.** uBOL defaults to *optimal* (specific cosmetic
+> filters only). **Generic** filters such as those in
+> `rulesets/scripting/generic/` only apply at *complete* (`MODE_COMPLETE`, 3),
+> so a harness must raise the mode before expecting generic tags. Modes are keyed
+> by hostname via the public suffix list, so fixtures should be served from a
+> PSL-valid hostname (e.g. `--host-resolver-rules`) rather than a bare IP.
+
 The e2e harness lives under `.e2e/` (gitignored; environment-specific chromium
 path). It asserts, on canyoublockit.com simple + extreme: every tracker the page
 actually loads is flagged, first-party assets are not, verdicts/records are
@@ -62,7 +87,8 @@ build adds `webRequest` + `debugger` via `tools/make-mv3.sh`).
 
 ```sh
 # from the uBlock submodule root
-./tools/make-mv3.sh chromium      # or: firefox
+git submodule update --init --recursive   # codemirror-ubol, s14e-serializer
+./tools/make-mv3.sh chromium              # or: firefox
 ```
 
 - Chromium: `chrome://extensions` → enable Developer mode → *Load unpacked* →
