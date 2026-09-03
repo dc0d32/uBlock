@@ -44,22 +44,30 @@ LIMITATIONS (inherent, called out honestly):
 PREREQUISITES
 -------------
 1. pip install playwright
-2. Launch your real Chrome with the uBOL Lite dev build + a debug port:
-     google-chrome \
-       --remote-debugging-port=9222 \
-       --user-data-dir="$HOME/.chrome-ubol-audit" \
-       --load-extension=/path/to/dist/build/uBOLite.chromium
-   (Annotation mode is on by default in this dev build.)
-3. Run:
-     python collect_audit.py --url "https://www.msn.com/en-us/news/..." \
+2. python -m playwright install chromium
+3. Run the self-contained path (supported on Chrome 137+):
+     python collect_audit.py \
+       --extension /path/to/dist/build/uBOLite.chromium \
+       --url "https://www.msn.com/en-us/news/..." \
        --reload 1 --settle 8 --out audit.json
-   Omit --url to attach to whatever tab is already open (matched by --match).
+
+The collector launches Playwright Chromium, loads the extension through
+Extensions.loadUnpacked over a CDP pipe, enables complete filtering, and uses a
+temporary browser profile. Pass --headful to watch it, --profile to retain its
+profile, or --browser-path to select another Chrome/Chromium executable.
+
+To attach to an already-running browser instead, omit --extension and pass
+--cdp (default http://localhost:9222). The extension must already be loaded;
+omit --url and use --match to collect an existing tab.
 """
 
 import argparse
 import json
+import os
 import secrets
+import shutil
 import sys
+import tempfile
 
 from playwright.sync_api import sync_playwright
 
@@ -217,6 +225,15 @@ def elem_content_sig(rec):
     ])
 
 
+def wal_record_matches_tab(rec, tab_id):
+    """Return whether a global WAL record belongs to the target tab.
+
+    The extension WAL is shared across tabs. Without this filter, a collector
+    run can replay element records left by previously visited pages.
+    """
+    return tab_id is None or rec.get("tabId") == tab_id
+
+
 def pull_durable_elements(control_page, tab_id, durable, sink_records, do_ack):
     """Merge the durable element sources (A store + C WAL) and the live stream
     (B) into `durable`, keyed by uid. Returns a dict of per-source raw uid counts
@@ -236,12 +253,14 @@ def pull_durable_elements(control_page, tab_id, durable, sink_records, do_ack):
         except Exception as e:
             eprint(f"  getAuditData(elements) failed: {e}")
     # C: WAL replay recovers anything the live stream missed (attached late,
-    # torn-down frame, etc.). Read the whole retained log.
+    # torn-down frame, etc.). The WAL is global, so retain only this tab.
     try:
         wal = control_page.evaluate(
             "async () => await chrome.runtime.sendMessage("
             "{ what: 'getAuditWal', sinceSeq: 0 })")
         for rec in (wal or {}).get("records", []):
+            if wal_record_matches_tab(rec, tab_id) is False:
+                continue
             stats["wal"] += 1
             stats["max_seq"] = max(stats["max_seq"], rec.get("seq", 0))
             uid = rec.get("uid")
@@ -269,7 +288,21 @@ def pull_durable_elements(control_page, tab_id, durable, sink_records, do_ack):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cdp", default="http://localhost:9222")
+    ap.add_argument("--cdp", default=None,
+                    help="Attach to an existing browser over CDP (default: "
+                         "http://localhost:9222 when --extension is omitted).")
+    ap.add_argument("--extension", default=None,
+                    help="Launch Playwright Chromium and load this unpacked "
+                         "extension. This is the supported automated path on "
+                         "Chrome 137+, where --load-extension is ignored.")
+    ap.add_argument("--browser-path", default=None,
+                    help="Chromium/Chrome executable for --extension mode. "
+                         "Defaults to Playwright's installed Chromium.")
+    ap.add_argument("--profile", default=None,
+                    help="Browser profile directory for --extension mode. "
+                         "Defaults to a temporary profile.")
+    ap.add_argument("--headful", action="store_true",
+                    help="Show the browser in --extension mode.")
     ap.add_argument("--url", default=None,
                     help="Navigate the target tab here. If omitted, attach to "
                          "an existing tab matched by --match.")
@@ -289,148 +322,200 @@ def main():
                     help="Acknowledge (drain) the WAL after reading it, so the "
                          "next run only sees new records.")
     args = ap.parse_args()
+    if args.extension and args.cdp:
+        ap.error("--extension and --cdp are mutually exclusive")
+    if (args.browser_path or args.profile or args.headful) and not args.extension:
+        ap.error("--browser-path, --profile, and --headful require --extension")
 
     elements_store = {}    # DOM-snapshot elements, keyed by content (el_key)
     network_store = {}
     sink_records = {}      # B: live CDP stream, keyed by record uid
     durable_records = {}   # A/C: background store + WAL, keyed by record uid
+    temporary_profile = None
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.connect_over_cdp(args.cdp)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
+    try:
+        with sync_playwright() as pw:
+            if args.extension:
+                extension_path = os.path.abspath(args.extension)
+                if not os.path.isfile(os.path.join(extension_path, "manifest.json")):
+                    ap.error(f"no manifest.json in --extension path: {extension_path}")
+                profile_path = args.profile
+                if profile_path is None:
+                    temporary_profile = tempfile.mkdtemp(prefix="ubol-audit-")
+                    profile_path = temporary_profile
+                browser_path = args.browser_path or pw.chromium.executable_path
+                context = pw.chromium.launch_persistent_context(
+                    profile_path,
+                    executable_path=browser_path,
+                    headless=not args.headful,
+                    ignore_default_args=["--disable-extensions"],
+                    args=["--enable-unsafe-extension-debugging"],
+                )
+                browser = context.browser
+                browser_session = browser.new_browser_cdp_session()
+                loaded = browser_session.send(
+                    "Extensions.loadUnpacked", {"path": extension_path})
+                ext_id = loaded["id"]
+                bootstrap = context.new_page()
+                bootstrap.goto(
+                    f"chrome-extension://{ext_id}/dashboard.html",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                bootstrap.wait_for_timeout(1000)
+                level = bootstrap.evaluate(
+                    "async () => await chrome.runtime.sendMessage("
+                    "{ what: 'setDefaultFilteringMode', level: 3 })")
+                if level != 3:
+                    raise RuntimeError(
+                        f"could not enable complete filtering mode (got {level})")
+                bootstrap.close()
+                eprint(f"launched extension: {ext_id}")
+            else:
+                cdp_endpoint = args.cdp or "http://localhost:9222"
+                browser = pw.chromium.connect_over_cdp(cdp_endpoint)
+                context = (
+                    browser.contexts[0]
+                    if browser.contexts else browser.new_context()
+                )
 
-        ext_id = find_extension_id(context)
-        if not ext_id:
-            eprint("ERROR: could not find the uBOL extension (service worker). "
-                   "Is the dev build loaded?")
-            sys.exit(2)
-
-        # B: real-time element stream. The in-page sink calls window.__ubolSink()
-        # at tag-time; exposing it at the CONTEXT level means it's present in
-        # every frame (incl. cross-origin) and every page created afterwards.
-        # Delivered synchronously, so a frame torn down right after tagging is
-        # still captured here even if the DOM walk below can never reach it.
-        def on_sink(source, arg):
-            try:
-                for rec in (arg or {}).get("records", []):
-                    uid = rec.get("uid")
-                    if uid:
-                        sink_records[uid] = rec
-            except Exception:
-                pass
-        try:
-            context.expose_binding("__ubolSink", on_sink)
-        except Exception as e:
-            eprint(f"  note: __ubolSink already exposed or unavailable ({e})")
-
-        # --- pick / open the target page -----------------------------------
-        page = None
-        if args.url:
-            page = context.new_page()
-        else:
-            for p in context.pages:
-                if p.url.startswith("http") and (not args.match or args.match in p.url):
-                    page = p
-                    break
-            if page is None:
-                eprint("ERROR: no matching existing tab; pass --url or --match.")
+            ext_id = ext_id if args.extension else find_extension_id(context)
+            if not ext_id:
+                eprint("ERROR: could not find the uBOL extension (service worker). "
+                       "Is the dev build loaded?")
                 sys.exit(2)
 
-        # Log the redirect chain, and snapshot DOM on every load so a redirect
-        # chain's intermediate docs AND the final one all contribute nodes.
-        page.on("framenavigated", lambda f:
-                eprint(f"  -> navigated: {f.url}") if f == page.main_frame else None)
-        page.on("load", lambda:
-                snapshot_frames(page, elements_store, network_store))
+            # B: real-time element stream. The in-page sink calls
+            # window.__ubolSink() at tag-time; exposing it at the CONTEXT level
+            # means it's present in every frame (incl. cross-origin) and every
+            # page created afterwards.
+            def on_sink(source, arg):
+                try:
+                    for rec in (arg or {}).get("records", []):
+                        uid = rec.get("uid")
+                        if uid:
+                            sink_records[uid] = rec
+                except Exception:
+                    pass
+            try:
+                context.expose_binding("__ubolSink", on_sink)
+            except Exception as e:
+                eprint(f"  note: __ubolSink already exposed or unavailable ({e})")
 
-        if args.url:
-            eprint(f"opening: {args.url}")
-            page.goto(args.url, wait_until="domcontentloaded", timeout=90000)
-        else:
-            eprint(f"attached: {page.url}")
+            # --- pick / open the target page -------------------------------
+            page = None
+            if args.url:
+                page = context.new_page()
+            else:
+                for p in context.pages:
+                    if (
+                        p.url.startswith("http") and
+                        (not args.match or args.match in p.url)
+                    ):
+                        page = p
+                        break
+                if page is None:
+                    eprint("ERROR: no matching existing tab; pass --url or --match.")
+                    sys.exit(2)
 
-        page.wait_for_timeout(int(args.settle * 1000))
-        snapshot_frames(page, elements_store, network_store)
+            # Log the redirect chain, and snapshot DOM on every load so a
+            # redirect chain's intermediate docs AND the final one contribute.
+            page.on("framenavigated", lambda f:
+                    eprint(f"  -> navigated: {f.url}")
+                    if f == page.main_frame else None)
+            page.on("load", lambda:
+                    snapshot_frames(page, elements_store, network_store))
 
-        # --- resolve the stable tabId via a unique title marker ------------
-        marker = "\u2063UBOLAUDIT-" + secrets.token_hex(4)
-        try:
-            page.evaluate("m => { try { document.title += m; } catch {} }", marker)
-        except Exception:
-            pass
-        control = context.new_page()
-        control.goto(f"chrome-extension://{ext_id}/dashboard.html",
-                     wait_until="domcontentloaded", timeout=30000)
-        control.wait_for_timeout(300)
-        tab_id = resolve_tab_id(control, marker, args.url or args.match or page.url)
-        if tab_id is None:
-            eprint("WARN: could not resolve tabId; relying on frame mirrors only.")
-        else:
-            eprint(f"target tabId = {tab_id}")
-        try:  # clean the marker back off the title
-            page.evaluate(
-                "m => { try { document.title = document.title.replace(m,''); } catch {} }",
-                marker)
-        except Exception:
-            pass
+            if args.url:
+                eprint(f"opening: {args.url}")
+                page.goto(args.url, wait_until="domcontentloaded", timeout=90000)
+            else:
+                eprint(f"attached: {page.url}")
 
-        # --- optional reloads (tabId stays the same; store accumulates) ----
-        for i in range(args.reload):
-            eprint(f"reload {i+1}/{args.reload}")
-            page.reload(wait_until="domcontentloaded", timeout=90000)
             page.wait_for_timeout(int(args.settle * 1000))
             snapshot_frames(page, elements_store, network_store)
 
-        # --- stabilization loop: keep pulling the authoritative background
-        #     store until the would-be-blocked count stops growing (captures
-        #     late XHR / ad / beacon telemetry) --------------------------------
-        last, stable, waited = -1, 0, 0.0
-        while waited < args.max_wait:
-            snapshot_frames(page, elements_store, network_store)
-            pull_background_network(control, tab_id, network_store)
-            total = len(network_store)
-            if total == last:
-                stable += 1
-                if stable >= args.stable_polls:
-                    break
+            # --- resolve the stable tabId via a unique title marker --------
+            marker = "\u2063UBOLAUDIT-" + secrets.token_hex(4)
+            try:
+                page.evaluate(
+                    "m => { try { document.title += m; } catch {} }", marker)
+            except Exception:
+                pass
+            control = context.new_page()
+            control.goto(f"chrome-extension://{ext_id}/dashboard.html",
+                         wait_until="domcontentloaded", timeout=30000)
+            control.wait_for_timeout(300)
+            tab_id = resolve_tab_id(
+                control, marker, args.url or args.match or page.url)
+            if tab_id is None:
+                eprint(
+                    "WARN: could not resolve tabId; relying on frame mirrors only.")
             else:
-                stable = 0
-            last = total
-            page.wait_for_timeout(1000)
-            waited += 1.0
+                eprint(f"target tabId = {tab_id}")
+            try:  # clean the marker back off the title
+                page.evaluate(
+                    "m => { try { document.title = "
+                    "document.title.replace(m,''); } catch {} }",
+                    marker)
+            except Exception:
+                pass
 
-        # Final authoritative pull + DOM sweep.
-        pull_background_network(control, tab_id, network_store)
-        snapshot_frames(page, elements_store, network_store)
+            # --- optional reloads (tabId stays the same; store accumulates)
+            for i in range(args.reload):
+                eprint(f"reload {i+1}/{args.reload}")
+                page.reload(wait_until="domcontentloaded", timeout=90000)
+                page.wait_for_timeout(int(args.settle * 1000))
+                snapshot_frames(page, elements_store, network_store)
 
-        # Merge the durable element sources (A store + C WAL + B stream). These
-        # are the loss-proof record of every tag event; the DOM snapshot is a
-        # supplement (live nodes still reachable, useful for live handles).
-        estats = pull_durable_elements(control, tab_id, durable_records,
-                                       sink_records, args.ack)
+            # Keep pulling the authoritative store until its request count
+            # stops growing, capturing late XHR/ad/beacon telemetry.
+            last, stable, waited = -1, 0, 0.0
+            while waited < args.max_wait:
+                snapshot_frames(page, elements_store, network_store)
+                pull_background_network(control, tab_id, network_store)
+                total = len(network_store)
+                if total == last:
+                    stable += 1
+                    if stable >= args.stable_polls:
+                        break
+                else:
+                    stable = 0
+                last = total
+                page.wait_for_timeout(1000)
+                waited += 1.0
 
-        # Unified element list: durable records first, then any DOM-snapshot-only
-        # element whose content signature isn't already represented.
-        seen_sigs = set(elem_content_sig(r) for r in durable_records.values())
-        elements = [dict(r, source=r.pop("_src", "durable"))
-                    for r in durable_records.values()]
-        dom_only = 0
-        for e in elements_store.values():
-            if elem_content_sig(e) in seen_sigs:
-                continue
-            elements.append(dict(e, source="dom"))
-            dom_only += 1
+            # Final authoritative pull + DOM sweep.
+            pull_background_network(control, tab_id, network_store)
+            snapshot_frames(page, elements_store, network_store)
 
-        result = {
-            "page": page.url,
-            "tabId": tab_id,
-            "frameCount": len(page.frames),
-            "sourceStats": estats,
-            "elements": elements,
-            "network": list(network_store.values()),
-        }
-        control.close()
-        browser.close()  # detaches CDP; does NOT close your Chrome
+            # Merge the durable element sources (A store + C WAL + B stream).
+            estats = pull_durable_elements(
+                control, tab_id, durable_records, sink_records, args.ack)
+
+            # Durable records first, then DOM-snapshot-only elements.
+            seen_sigs = set(
+                elem_content_sig(r) for r in durable_records.values())
+            elements = [dict(r, source=r.pop("_src", "durable"))
+                        for r in durable_records.values()]
+            for element in elements_store.values():
+                if elem_content_sig(element) in seen_sigs:
+                    continue
+                elements.append(dict(element, source="dom"))
+
+            result = {
+                "page": page.url,
+                "tabId": tab_id,
+                "frameCount": len(page.frames),
+                "sourceStats": estats,
+                "elements": elements,
+                "network": list(network_store.values()),
+            }
+            control.close()
+            browser.close()
+    finally:
+        if temporary_profile is not None:
+            shutil.rmtree(temporary_profile, ignore_errors=True)
 
     derived_dom = [e for e in result["elements"] if e.get("derivedFrom")]
     removed = [e for e in result["elements"] if e.get("event") == "remove"]

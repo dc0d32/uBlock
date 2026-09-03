@@ -29,6 +29,7 @@ Unit tests (no browser, run anywhere):
 
 ```sh
 npm run test:mv3          # node --test "platform/mv3/tests/**/*.test.js"
+python -m unittest discover -s platform/mv3/tests -p "test_*.py"
 ```
 
 End-to-end (headless Chromium via Puppeteer) — validates the full pipeline
@@ -145,9 +146,9 @@ appear only when the build is sideloaded/dev.
 
 ## Bulk collection tool (Playwright/CDP)
 
-`platform/mv3/tools/collect_audit.py` attaches to a real Chrome (dev build
-loaded) over CDP and gathers, in one run and without missing telemetry across
-redirects/reloads/late requests:
+`platform/mv3/tools/collect_audit.py` can launch the dev build itself or attach
+to an existing Chrome over CDP. It gathers, in one run and without missing
+telemetry across redirects/reloads/late requests:
 
 - every would-be-blocked network record, read from the **background** store
   (the cumulative source of truth, keyed by tabId — survives reloads/redirects),
@@ -172,12 +173,23 @@ Each element in the output carries its `source` (`stream`/`wal`/`store`/`dom`),
 
 ```
 pip install playwright
-google-chrome --remote-debugging-port=9222 \
-  --user-data-dir="$HOME/.chrome-ubol-audit" \
-  --load-extension=/path/to/dist/build/uBOLite.chromium
+python -m playwright install chromium
 python platform/mv3/tools/collect_audit.py \
+  --extension dist/build/uBOLite.chromium \
   --url "https://example.com/…" --reload 1 --settle 8 --out audit.json
 ```
+
+`--extension` is the recommended self-contained path on Chrome 137+: it launches
+Playwright Chromium, uses the supported `Extensions.loadUnpacked` CDP-pipe API,
+enables complete filtering, and cleans up a temporary profile. Add `--headful`
+to watch the run, `--profile` to retain the profile, or `--browser-path` to use a
+specific Chrome/Chromium executable.
+
+To collect an existing tab, manually load the unpacked extension in a browser
+already exposing a CDP port, then use `--cdp http://localhost:9222 --match
+example.com`. The old `--load-extension` launch flag is ignored by Chrome 137+.
+The WAL is shared by all tabs; the collector filters it by target `tabId` before
+merging records so one run cannot include elements retained from another tab.
 
 Inherent limits: a node in a **closed** shadow root is captured via the in-page
 sink (stream/wal/store) but not by the live DOM snapshot (it has no `source:"dom"`
